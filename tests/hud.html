@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HUD test — Tiny Space Program</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="../src/ui/base.css">
+  <script type="importmap">
+  { "imports": { "three": "../node_modules/three/build/three.module.js", "three/addons/": "../node_modules/three/examples/jsm/" } }
+  </script>
+  <style>
+    /* Stand-in "3D view" backgrounds so the translucent HUD can be judged in context. */
+    #scene-bg { position: fixed; inset: 0; transition: background 0.6s; }
+    #scene-bg::after { content: ''; position: absolute; inset: 0; pointer-events: none; }
+    body[data-bg=sky] #scene-bg { background: linear-gradient(180deg, #2c6fc4 0%, #6fb0ec 55%, #cfe7fb 78%, #6f8a5a 78.2%, #4d6a3c 100%); }
+    body[data-bg=sky] #scene-bg::after { background:
+      linear-gradient(90deg, transparent 49.2%, #3b4252 49.2%, #3b4252 50.8%, transparent 50.8%) 0 0 / 100% 100% no-repeat; clip-path: polygon(48% 34%, 52% 34%, 52% 78%, 48% 78%); }
+    body[data-bg=ascent] #scene-bg { background: linear-gradient(180deg, #0d2a5c 0%, #2c6fc4 45%, #7cb8ee 80%, #b8dcf8 100%); }
+    body[data-bg=ascent] #scene-bg::after { background: radial-gradient(ellipse 5% 40% at 50% 70%, rgba(255,230,180,0.9), rgba(255,160,60,0.4) 40%, transparent 70%); }
+    body[data-bg=space] #scene-bg { background:
+      radial-gradient(ellipse 160% 70% at 50% 150%, #1d4f93 0 58%, #5aa3ee 61%, rgba(120,190,255,0.35) 63%, transparent 67%),
+      radial-gradient(1px 1px at 10% 20%, #fff, transparent), radial-gradient(1px 1px at 30% 60%, #cde, transparent),
+      radial-gradient(1.5px 1.5px at 70% 30%, #fff, transparent), radial-gradient(1px 1px at 85% 12%, #fff, transparent),
+      radial-gradient(1px 1px at 55% 45%, #fff, transparent), radial-gradient(1px 1px at 20% 80%, #9ab, transparent),
+      linear-gradient(180deg, #02040a, #060b18); }
+    body[data-bg=reentry] #scene-bg { background: radial-gradient(ellipse 40% 50% at 50% 55%, #ffd49a, #ff7a2a 30%, #a8200c 60%, #2a0a06 100%); }
+    body[data-bg=chute] #scene-bg { background: linear-gradient(180deg, #3a78c9 0%, #8cc2f0 60%, #d8ecfb 100%); }
+    body[data-bg=sea] #scene-bg { background: linear-gradient(180deg, #4f8fe0 0%, #a6d1f6 52%, #e4f2fd 60%, #2b6aa8 60.2%, #164a82 100%); }
+    body[data-bg=boom] #scene-bg { background: radial-gradient(circle at 50% 50%, #ffcf8a 0, #ff6a2a 12%, #5a1a0a 35%, #0c0604 70%); }
+    body[data-bg=moon] #scene-bg { background: radial-gradient(ellipse 150% 70% at 50% 150%, #6d6d74 0 58%, #a9a9ae 61%, transparent 62%), linear-gradient(180deg, #010208, #050812); }
+    body[data-bg=map] #scene-bg { background: radial-gradient(circle at 50% 48%, #3f7fd1 0 9%, rgba(80,160,255,0.25) 9.6%, transparent 10.5%), radial-gradient(ellipse 30% 22% at 50% 48%, transparent 98%, rgba(116,198,255,0.7) 99%, transparent 100%), linear-gradient(180deg, #03060e, #070d1c); }
+  </style>
+</head>
+<body data-bg="space">
+  <div id="scene-bg"></div>
+  <div id="ui-root"></div>
+  <div id="toast-root"></div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { bus } from '../src/core/events.js';
+    import { game } from '../src/core/state.js';
+    import { WARP_RATES } from '../src/core/constants.js';
+    import { PARTS } from '../src/data/parts.js';
+    import { BODIES, latLonToDir } from '../src/data/bodies.js';
+    import { FlightHUD } from '../src/ui/hud.js';
+    import { CrewPortraits } from '../src/ui/crewPortraits.js';
+
+    // ───────────────────────── Mock vessel / flight (realistic enough to drive every HUD element) ─────────────────────────
+    let uidN = 1;
+    // Parts carry a real tree (parentUid / attach) so game/deltav.js can simulate the staging exactly like in flight.
+    const STACK = { kind: 'stack', node: 'top', parentNode: 'bottom' }, SURF = { kind: 'surface' };
+    function mkPart(id, stage, parent = null, attach = STACK) {
+      const def = PARTS[id];
+      const resources = {};
+      for (const [k, v] of Object.entries(def.resources || {})) resources[k] = { amount: v, max: v };
+      const p = { uid: 'p' + uidN++, id, def, stage, resources, temp: 288, destroyed: false, pos: new THREE.Vector3(), rot: new THREE.Quaternion(),
+        parentUid: parent ? parent.uid : null, attach: parent ? attach : null };
+      if (def.modules.engine) p.engine = { active: false, throttleEff: 0, thrust: 0, flameout: false, gimbal: new THREE.Vector2() };
+      if (def.modules.parachute) p.chute = { state: 'stowed', t: 0 };
+      if (def.modules.legs) p.legs = { deployed: false, t: 0, compression: 0 };
+      return p;
+    }
+    function crewedCraft() {
+      const pod = mkPart('pod_mk3', -1);
+      const chute = mkPart('chute_xl', 0, pod, { kind: 'stack', node: 'bottom', parentNode: 'top' });
+      const hs = mkPart('heatshield_s2', -1, pod), d1 = mkPart('decoupler_s2', 1, hs), t16 = mkPart('tank_l16', -1, d1);
+      const poodle = mkPart('eng_poodle', 2, t16), d2 = mkPart('decoupler_s2', 2, poodle);
+      const t32a = mkPart('tank_l32', -1, d2), t32b = mkPart('tank_l32', -1, t32a), skip = mkPart('eng_skipper', 4, t32b);
+      const r1 = mkPart('decoupler_radial', 3, t32a, SURF), r2 = mkPart('decoupler_radial', 3, t32a, SURF);
+      return [chute, pod, hs, d1, t16, poodle, d2, t32a, t32b, skip, r1, r2, mkPart('srb_thumper', 4, r1, SURF), mkPart('srb_thumper', 4, r2, SURF),
+        ...[0, 1, 2, 3].map(() => mkPart('fin_basic', -1, t32b, SURF))];
+    }
+    function probeCraft() {
+      const core = mkPart('probe_core', -1), bat = mkPart('battery', -1, core), tank = mkPart('tank_t200', -1, bat);
+      return [core, bat, mkPart('solar_panel', -1, bat, SURF), mkPart('solar_panel', -1, bat, SURF), tank, mkPart('eng_spark', 0, tank)];
+    }
+    function landerCraft() {
+      const pod = mkPart('pod_mk1', -1);
+      const chute = mkPart('chute_mk16', 0, pod, { kind: 'stack', node: 'bottom', parentNode: 'top' });
+      const hs = mkPart('heatshield_s1', -1, pod), d1 = mkPart('decoupler_s1', 1, hs), tank = mkPart('tank_t800', -1, d1), eng = mkPart('eng_terrier', 2, tank);
+      return [chute, pod, hs, d1, tank, eng, ...[0, 1, 2, 3].map(() => mkPart('legs_lt1', -1, tank, SURF))];
+    }
+    /** Heat the vessel so that the hottest part (the heat shield, or else the first part) sits at `frac` of its range
+     *  above ambient — the HUD's HEAT gauge reads part temperatures. Every other part stays at ambient (288 K). */
+    function setHeat(v, frac) {
+      const hot = v.parts.find((p) => p.def.modules.heatShield) || v.parts[0];
+      for (const p of v.parts) p.temp = 288;
+      if (hot) hot.temp = 300 + Math.max(0, frac) * ((hot.def.maxTemp || 2000) - 300);
+    }
+    const STAGE_DV = { 4: 1720, 3: 0, 2: 2310, 1: 0, 0: 0 };
+    const STAGE_BT = { 4: 64, 3: 0, 2: 118, 1: 0, 0: 0 };
+
+    class MockVessel {
+      constructor({ probe = false, lander = false } = {}) {
+        this.id = probe ? 'probe-1' : lander ? 'lander-1' : 'orbiter-1';
+        this.name = probe ? 'Pip Pathfinder' : lander ? 'Lune Lander' : 'Orbiter Trio';
+        this.type = probe ? 'probe' : 'ship';
+        this.bodyId = 'verda';
+        this.allParts = probe ? probeCraft() : lander ? landerCraft() : crewedCraft();
+        this.parts = [...this.allParts];
+        this.currentStage = probe ? 1 : lander ? 2 : 5;
+        this.lander = lander;
+        this.controls = { throttle: 0.5, pitch: 0, yaw: 0, roll: 0, x: 0, y: 0, z: 0, sas: false, sasMode: 'stability', rcs: false, gear: false, brakes: false, lights: false, precision: false, navMode: 'auto' };
+        this.crew = probe ? [] : lander ? [{ id: 'c4', name: 'Zeb Tinyman', role: 'Pilot', courage: 0.8, stupidity: 0.4, badass: true }] : [
+          { id: 'c1', name: 'Jebbo Tinyman', role: 'Pilot', courage: 0.95, stupidity: 0.85, badass: true },
+          { id: 'c2', name: 'Bilby Tinyman', role: 'Engineer', courage: 0.35, stupidity: 0.35, badass: false },
+          { id: 'c3', name: 'Valla Tinyman', role: 'Scientist', courage: 0.6, stupidity: 0.2, badass: false },
+        ];
+        this.maneuverNodes = [];
+        this.target = null;
+        this.history = { launchUT: 0, maxAltitude: 0, maxSpeed: 0, visited: new Set(), landed: new Set(), orbited: new Set(), splashed: new Set() };
+        this.destroyed = false;
+        this.pos = new THREE.Vector3(); this.vel = new THREE.Vector3(); this.rot = new THREE.Quaternion();
+        this.situation = 'PRELAUNCH';
+        this.orbit = null;
+        this.probe = probe;
+        const V = () => new THREE.Vector3();
+        this.telemetry = {
+          bodyId: 'verda', bodyName: 'Verda', situation: 'PRELAUNCH', ut: 0, altitude: 0, radarAltitude: 0, lat: -0.0972, lon: -74.5577,
+          orbitalSpeed: 0, surfaceSpeed: 0, verticalSpeed: 0, horizontalSpeed: 0, apoapsis: 0, periapsis: 0, timeToAp: 0, timeToPe: 0,
+          inclination: 0, eccentricity: 0, period: 0, gForce: 1, mach: 0, dynamicPressure: 0, staticPressure: 101.325, density: 1.225,
+          externalTemp: 288, mass: 0, thrust: 0, maxThrust: 0, twr: 0, maxTwr: 0, stageDeltaV: 0, totalDeltaV: 0, stageBurnTime: 0,
+          throttle: 0.5, sas: false, sasMode: 'stability', rcs: false, gear: false, brakes: false, lights: false, currentStage: 5,
+          heatRatio: 0.1, reentryIntensity: 0, electricCharge: 1, resources: {}, stageResources: {},
+          up: V(), north: V(), east: V(), forward: V(), top: V(), right: V(), prograde: V(), surfacePrograde: V(), normal: V(), radialOut: V(),
+          heading: 90, pitch: 90, roll: 0, warpRate: 1, warpMode: 'rails',
+        };
+      }
+      setControl(name, value) {
+        if (!(name in this.controls)) return;
+        this.controls[name] = value;
+        if (['sas', 'rcs', 'gear', 'brakes', 'lights'].includes(name)) bus.emit('control:toggle', { vessel: this, what: name, value });
+      }
+      getStages() {
+        const out = [];
+        for (let s = this.currentStage; s >= 0; s--) {
+          const parts = this.parts.filter((p) => p.stage === s);
+          if (!parts.length) continue;
+          let dv = this.probe ? (s === 0 ? 3120 : 0) : (STAGE_DV[s] ?? 0);
+          let bt = this.probe ? (s === 0 ? 410 : 0) : (STAGE_BT[s] ?? 0);
+          if (s === this.currentStage) { dv *= this._activeFrac ?? 1; bt *= this._activeFrac ?? 1; }
+          out.push({ stage: s, parts, deltaV: dv, burnTime: bt });
+        }
+        return out;
+      }
+      stageTo(n) {   // drop parts of all fired stages ≥ n+1 that separate, activate engines of stage n
+        this.currentStage = n;
+        if (this.lander) { for (const p of this.parts) if (p.engine) p.engine.active = p.stage >= n; return; }
+        const dropBelow = { 4: [], 3: ['srb_thumper', 'decoupler_radial'], 2: ['srb_thumper', 'decoupler_radial', 'eng_skipper', 'tank_l32', 'fin_basic'], 1: ['srb_thumper', 'decoupler_radial', 'eng_skipper', 'tank_l32', 'fin_basic', 'eng_poodle', 'tank_l16', 'decoupler_s2'], 0: ['srb_thumper', 'decoupler_radial', 'eng_skipper', 'tank_l32', 'fin_basic', 'eng_poodle', 'tank_l16', 'decoupler_s2'] };
+        if (!this.probe) {
+          const gone = new Set(dropBelow[n] || []);
+          this.parts = this.allParts.filter((p) => !gone.has(p.id));
+        }
+        for (const p of this.parts) if (p.engine) p.engine.active = p.stage >= n;
+      }
+    }
+
+    class MockFlight {
+      constructor() { this.vessels = []; this.active = null; this.warp = { index: 0, rate: 1, mode: 'rails' }; this.calls = []; this.denyWarp = null; }
+      setWarp(i) {
+        this.calls.push(['setWarp', i]);
+        if (i > 0 && this.denyWarp) { bus.emit('warp:denied', { reason: this.denyWarp }); return { ok: false, reason: this.denyWarp }; }
+        const physics = !!this.physicsWarp;
+        const idx = physics ? Math.min(i, 3) : i;
+        this.warp = { index: idx, rate: physics ? [1, 2, 3, 4][idx] : WARP_RATES[idx], mode: physics ? 'physics' : 'rails' };
+        bus.emit('warp:change', { ...this.warp });
+        return { ok: true };
+      }
+      warpTo(ut) { this.calls.push(['warpTo', ut]); }
+    }
+
+    // ───────────────────────── Geometry helpers ─────────────────────────
+    const R = 600000, MU = 3.5316e12;
+    function surfaceFrame(t, latDeg, lonDeg) {
+      const d = latLonToDir(latDeg, lonDeg); t.up.set(d.x, d.y, d.z).normalize();
+      const la = latDeg * Math.PI / 180, lo = lonDeg * Math.PI / 180;
+      t.north.set(-Math.sin(la) * Math.cos(lo), Math.cos(la), Math.sin(la) * Math.sin(lo)).normalize();
+      t.east.crossVectors(t.north, t.up).normalize();
+    }
+    const _H = new THREE.Vector3(), _tmp = new THREE.Vector3(), _q = new THREE.Quaternion();
+    function dirFrom(t, hdg, pitch, out) {
+      const h = hdg * Math.PI / 180, p = pitch * Math.PI / 180;
+      _H.copy(t.north).multiplyScalar(Math.cos(h)).addScaledVector(t.east, Math.sin(h));
+      return out.copy(_H).multiplyScalar(Math.cos(p)).addScaledVector(t.up, Math.sin(p)).normalize();
+    }
+    /** Set forward/top/right (ARCHITECTURE §1: right = forward × top). Pad convention: straight up, belly east, top west.
+     *  Otherwise "pilot upright" (top toward the sky) + roll. */
+    function attitude(t, hdg, pitch, roll = 0) {
+      if (pitch >= 89.99) { t.forward.copy(t.up); t.top.copy(t.east).negate(); }
+      else {
+        dirFrom(t, hdg, pitch, t.forward);
+        const h = hdg * Math.PI / 180, p = pitch * Math.PI / 180;
+        _H.copy(t.north).multiplyScalar(Math.cos(h)).addScaledVector(t.east, Math.sin(h));
+        t.top.copy(_H).multiplyScalar(-Math.sin(p)).addScaledVector(t.up, Math.cos(p)).normalize();
+      }
+      if (roll) { _q.setFromAxisAngle(t.forward, roll * Math.PI / 180); t.top.applyQuaternion(_q); }
+      t.right.crossVectors(t.forward, t.top).normalize();
+      t.heading = hdg; t.pitch = pitch; t.roll = roll;
+    }
+    function orbitVectors(t, v, speed, hdg = 90, fpa = 0) {
+      dirFrom(t, hdg, fpa, t.prograde);
+      v.pos.copy(t.up).multiplyScalar(R + t.altitude);
+      v.vel.copy(t.prograde).multiplyScalar(speed);
+      t.normal.crossVectors(v.pos, v.vel).normalize();
+      t.radialOut.crossVectors(t.prograde, t.normal).normalize();
+    }
+    function atmo(alt) {
+      if (alt >= 70000) return { p: 0, rho: 0 };
+      const f = (Math.exp(-alt / 5600) - Math.exp(-70000 / 5600)) / (1 - Math.exp(-70000 / 5600));
+      return { p: 101.325 * f, rho: 1.225 * f };
+    }
+    function resourcesOf(parts, filter = () => true) {
+      const out = {};
+      for (const p of parts) if (filter(p)) for (const [k, r] of Object.entries(p.resources)) {
+        out[k] ||= { amount: 0, max: 0 }; out[k].amount += r.amount; out[k].max += r.max;
+      }
+      return out;
+    }
+    const num0 = (x) => (Number.isFinite(x) ? x : 0);
+    function setFuel(v, ids, frac) { for (const p of v.parts) if (ids.includes(p.id)) for (const r of Object.values(p.resources)) r.amount = r.max * frac; }
+    function massOf(v) { let m = 0; for (const p of v.parts) { m += p.def.mass * 1000; for (const [k, r] of Object.entries(p.resources)) m += r.amount * ({ LiquidFuel: 5, Oxidizer: 5, SolidFuel: 7.5, MonoPropellant: 4, Ablator: 1 }[k] ?? 0); } return m; }
+
+    // ───────────────────────── Phases ─────────────────────────
+    const flight = new MockFlight();
+    let vessel = null;
+    let phaseName = null, phase = null, tau = 0;
+    const BASE_UT = 2 * 21600 + 3 * 3600 + 14 * 60;   // Y1 D3 03:14:00
+
+    // Mock convention: each phase writes the HEAT value it wants into t.heatRatio; common() turns it into part
+    // temperatures (the HUD reads the hottest part's temperature above ambient).
+    function common(t, v) {
+      t.ut = game.ut;
+      if (!v.keepTemps) setHeat(v, num0(t.heatRatio));
+      t.resources = resourcesOf(v.parts);
+      const cs = v.currentStage;
+      t.stageResources = resourcesOf(v.parts, (p) => (p.stage >= cs - 1 && p.def.modules.engine) || ['tank_l32', 'tank_l16', 'tank_t200'].includes(p.id));
+      t.mass = massOf(v);
+      t.currentStage = cs;
+      Object.assign(t, { sas: v.controls.sas, sasMode: v.controls.sasMode, rcs: v.controls.rcs, gear: v.controls.gear, brakes: v.controls.brakes, lights: v.controls.lights, throttle: v.controls.throttle });
+      t.warpRate = flight.warp.rate; t.warpMode = flight.warp.mode;
+      v.situation = t.situation;
+    }
+
+    const PHASES = {
+      pad: {
+        bg: 'sky',
+        setup(v) {
+          v.stageTo(5); v.currentStage = 5;
+          for (const p of v.parts) if (p.engine) p.engine.active = false;
+          v.controls.throttle = 0.5; v.controls.sas = true; v.controls.sasMode = 'stability';
+          Object.assign(v.telemetry, { situation: 'PRELAUNCH', altitude: 74.6, radarAltitude: 6.2, heatRatio: 0, gForce: 1, biome: 'Launch Pad' });
+          game.ut = BASE_UT; v.history.launchUT = NaN;
+        },
+        tick(v, t) {
+          surfaceFrame(t, -0.0972, -74.5577); attitude(t, 90, 90);
+          orbitVectors(t, v, 174.9, 90, 0);
+          Object.assign(t, { orbitalSpeed: 174.9, surfaceSpeed: 0, verticalSpeed: 0, horizontalSpeed: 0, surfacePrograde: t.surfacePrograde.set(0, 0, 0),
+            apoapsis: 74.6, periapsis: -598000, timeToAp: 0, timeToPe: 1200, inclination: 0.1, eccentricity: 0.998, period: 1740,
+            mach: 0, dynamicPressure: 0, staticPressure: 100.2, density: 1.21, thrust: 0, maxThrust: 3040000, twr: 0, maxTwr: 1.56, stageDeltaV: 1720, totalDeltaV: 4030 });
+        },
+      },
+      liftoff: {
+        bg: 'ascent',
+        setup(v) { PHASES.pad.setup(v); v.controls.throttle = 1; game.ut = BASE_UT; },
+        tick(v, t, tau) {
+          if (tau > 0.4 && v.currentStage === 5) { v.stageTo(4); v.history.launchUT = game.ut; bus.emit('vessel:staged', { vessel: v, stage: 4, parts: [] }); }
+          const k = Math.max(0, tau - 0.4);
+          surfaceFrame(t, -0.0972, -74.5577); attitude(t, 90, 90);
+          const alt = 74.6 + 3 * k * k * 6;
+          t.situation = v.currentStage === 5 ? 'PRELAUNCH' : 'FLYING';
+          t.altitude = alt; t.radarAltitude = alt - 68;
+          const vs = 36 * k;
+          orbitVectors(t, v, 174.9 + vs, 90, 80);
+          t.surfacePrograde.copy(t.up);
+          const a = atmo(alt);
+          Object.assign(t, { surfaceSpeed: vs, orbitalSpeed: Math.hypot(vs, 174.9), verticalSpeed: vs, horizontalSpeed: 0.2, gForce: 1.62 + Math.sin(tau * 40) * 0.04,
+            mach: vs / 340, dynamicPressure: 0.5 * a.rho * vs * vs / 1000, staticPressure: a.p, density: a.rho, heatRatio: 0,
+            apoapsis: 74.6 + vs * vs / 19.6, periapsis: -597000, timeToAp: vs / 9.8, timeToPe: 1100, inclination: 0.1, eccentricity: 0.99, period: 1700,
+            thrust: 3060000, maxThrust: 3060000, twr: 1.58, maxTwr: 1.58, stageDeltaV: 1718, totalDeltaV: 4028 });
+          for (const p of v.parts) if (p.engine && p.engine.active) { p.engine.throttleEff = 1; p.engine.thrust = 1; }
+        },
+      },
+      ascent: {
+        bg: 'ascent',
+        setup(v) { v.stageTo(4); v.controls.throttle = 1; v.controls.sas = true; v.controls.sasMode = 'prograde'; game.ut = BASE_UT + 61; v.history.launchUT = BASE_UT; v.telemetry.biome = 'Grasslands'; },
+        tick(v, t, tau) {
+          const k = tau % 30;
+          const alt = 9200 + 390 * k + 7 * k * k;
+          surfaceFrame(t, -0.0972, -74.2); attitude(t, 90, 58 - 0.5 * k, 0);
+          const ss = 430 + 21 * k;
+          const a = atmo(alt);
+          t.situation = 'FLYING'; t.altitude = alt; t.radarAltitude = alt - 320;
+          dirFrom(t, 90, 55 - 0.5 * k, t.surfacePrograde);
+          orbitVectors(t, v, ss + 150, 90, 48 - 0.5 * k);
+          v._activeFrac = 0.42 - k * 0.012;
+          setFuel(v, ['srb_thumper'], 0.36 - k * 0.011);
+          setFuel(v, ['tank_l32'], 0.62 - k * 0.008);
+          for (const p of v.parts) if (p.engine && p.stage === 4) { p.engine.active = true; p.engine.throttleEff = 1; }
+          Object.assign(t, { surfaceSpeed: ss, orbitalSpeed: ss + 150, verticalSpeed: ss * 0.8, horizontalSpeed: ss * 0.6,
+            gForce: 2.1 + 0.03 * k + Math.sin(tau * 23) * 0.05, mach: ss / 300, dynamicPressure: 0.5 * a.rho * ss * ss / 1000, staticPressure: a.p, density: a.rho,
+            heatRatio: 0.03 + 0.003 * k, apoapsis: 21000 + 1600 * k, periapsis: -540000 + 4000 * k, timeToAp: 58 + k, timeToPe: 1500, inclination: 0.11, eccentricity: 0.9,
+            period: 1900, thrust: 2900000, maxThrust: 2950000, twr: 2.2, maxTwr: 2.25, stageDeltaV: 1720 * v._activeFrac, totalDeltaV: 2310 + 1720 * v._activeFrac });
+        },
+      },
+      orbit: {
+        bg: 'space',
+        setup(v) {
+          v.stageTo(2); v.controls.throttle = 0; v.controls.sas = true; v.controls.sasMode = 'prograde'; v.controls.rcs = true; v.controls.lights = true;
+          setFuel(v, ['tank_l16'], 0.86);
+          game.ut = BASE_UT + 612; v.history.launchUT = BASE_UT;
+          for (const p of v.parts) if (p.engine) { p.engine.active = p.stage === 2; p.engine.throttleEff = 0; }
+          v.maneuverNodes = [{ id: 'n1', ut: game.ut + 96, dv: { prograde: 858, normal: 24, radial: -31 }, targetVel: null, bodyId: 'verda' }];
+          const station = new MockVessel(); station.id = 'station-1'; station.name = 'Station Alpha'; station.bodyId = 'verda';
+          flight.vessels = [v, station]; v.target = { type: 'vessel', id: 'station-1' };
+          this.station = station;
+        },
+        tick(v, t, tau) {
+          const lon = -60 + tau * 0.2;
+          surfaceFrame(t, 0.4, lon);
+          t.situation = 'ORBITING'; t.altitude = 84200 + Math.sin(tau * 0.3) * 600; t.radarAltitude = t.altitude - 1200;
+          orbitVectors(t, v, 2279, 90, 0.3);
+          attitude(t, 90, 0.3, 0);
+          t.forward.copy(t.prograde); t.top.copy(t.radialOut); t.right.crossVectors(t.forward, t.top);
+          t.surfacePrograde.copy(t.prograde);
+          const st = this.station;
+          st.pos.copy(v.pos).addScaledVector(t.prograde, 7400).addScaledVector(t.up, 1500).addScaledVector(t.north, 900);
+          st.vel.copy(v.vel).addScaledVector(t.prograde, -6.2).addScaledVector(t.north, 1.9).addScaledVector(t.up, -0.8);
+          Object.assign(t, { surfaceSpeed: 2104, orbitalSpeed: 2279, verticalSpeed: 4.1, horizontalSpeed: 2104, gForce: 0.0, mach: 0, dynamicPressure: 0, staticPressure: 0, density: 0,
+            heatRatio: 0, apoapsis: 86412, periapsis: 81903, timeToAp: 842 - tau, timeToPe: 842 + 1004 - tau, inclination: 0.42, eccentricity: 0.0033, period: 2008,
+            thrust: 0, maxThrust: 250000, twr: 0, maxTwr: 1.62, stageDeltaV: 2012, totalDeltaV: 2012 });
+        },
+      },
+      burn: {
+        bg: 'space',
+        setup(v) {
+          PHASES.orbit.setup.call(PHASES.orbit, v);
+          v.controls.throttle = 1; v.controls.sasMode = 'maneuver';
+          v.maneuverNodes = [{ id: 'n2', ut: game.ut + 14, dv: { prograde: 858, normal: 24, radial: -31 }, targetVel: new THREE.Vector3(), bodyId: 'verda' }];
+          v.target = null;
+          const self = v;
+          v.orbit = { getStateAtUT(ut, p, vel) { vel.copy(self.vel); p.copy(self.pos); return { pos: p, vel }; } };
+        },
+        tick(v, t, tau) {
+          PHASES.orbit.tick.call(PHASES.orbit, v, t, tau);
+          const node = v.maneuverNodes[0];
+          const remaining = Math.max(0, 590 - (tau % 20) * 12);
+          _tmp.copy(t.prograde).multiplyScalar(0.998).addScaledVector(t.normal, 0.03).addScaledVector(t.radialOut, -0.045).normalize();
+          node.targetVel.copy(v.vel).addScaledVector(_tmp, remaining);
+          t.forward.copy(_tmp); t.top.copy(t.radialOut); t.right.crossVectors(t.forward, t.top).normalize();
+          for (const p of v.parts) if (p.engine && p.stage === 2) { p.engine.active = true; p.engine.throttleEff = 1; }
+          setFuel(v, ['tank_l16'], 0.8 - (tau % 20) * 0.02);
+          Object.assign(t, { gForce: 1.72, thrust: 250000, twr: 1.7, apoapsis: 86412 + tau * 90000, timeToAp: 900 });
+        },
+      },
+      warp: {
+        bg: 'space',
+        setup(v) { PHASES.orbit.setup.call(PHASES.orbit, v); v.maneuverNodes = []; v.target = null; v.controls.rcs = false; flight.setWarp(5); },
+        tick(v, t, tau) {
+          PHASES.orbit.tick.call(PHASES.orbit, v, t, tau * 60);
+          Object.assign(t, { timeToAp: (842 - tau * 1000) % 2008 + (tau * 1000 > 842 ? 2008 : 0), timeToPe: (1846 - tau * 1000 % 2008 + 2008) % 2008 });
+        },
+        after() { flight.warp = { index: 0, rate: 1, mode: 'rails' }; },
+      },
+      reentry: {
+        bg: 'reentry',
+        setup(v) {
+          v.stageTo(1); v.controls.throttle = 0; v.controls.sas = true; v.controls.sasMode = 'retrograde';
+          game.ut = BASE_UT + 4200; v.history.launchUT = BASE_UT;
+          for (const p of v.parts) if (p.chute) p.chute.state = 'stowed';
+        },
+        tick(v, t, tau) {
+          const k = tau % 25;
+          const alt = 41000 - 210 * k;
+          surfaceFrame(t, 1.2, -90 + tau * 0.1);
+          const ss = 2240 - 38 * k;
+          dirFrom(t, 92, -9 - 0.2 * k, t.surfacePrograde);
+          orbitVectors(t, v, ss + 170, 92, -8.5);
+          t.forward.copy(t.surfacePrograde).negate(); dirFrom(t, 92, 0, _tmp);
+          t.top.copy(t.up).addScaledVector(t.forward, -t.up.dot(t.forward)).normalize();
+          t.right.crossVectors(t.forward, t.top).normalize();
+          t.heading = 272; t.pitch = 9;
+          const a = atmo(alt);
+          t.situation = 'FLYING'; t.altitude = alt; t.radarAltitude = alt - 400;
+          Object.assign(t, { surfaceSpeed: ss, orbitalSpeed: ss + 170, verticalSpeed: -330 + 6 * k, horizontalSpeed: ss * 0.98,
+            gForce: 5.6 + Math.sin(tau * 3.1) * 1.1 + Math.sin(tau * 17) * 0.2, mach: ss / 290, dynamicPressure: 0.5 * a.rho * ss * ss / 1000, staticPressure: a.p, density: a.rho,
+            heatRatio: 0.8 + Math.sin(tau * 1.7) * 0.06, reentryIntensity: 0.85, apoapsis: 38000, periapsis: -118000, timeToAp: -1, timeToPe: 260, inclination: 1.2,
+            eccentricity: 0.14, period: 1600, thrust: 0, maxThrust: 0, twr: 0, maxTwr: 0, stageDeltaV: 0, totalDeltaV: 0 });
+        },
+        after() { vessel.telemetry.reentryIntensity = 0; },
+      },
+      chute: {
+        bg: 'chute',
+        setup(v) {
+          v.stageTo(0); v.controls.sas = false; v.controls.throttle = 0;
+          game.ut = BASE_UT + 4520; v.history.launchUT = BASE_UT;
+          for (const p of v.parts) if (p.chute) { p.chute.state = 'deployed'; p.chute.t = 1; }
+          v.telemetry.biome = 'Shallows';
+        },
+        tick(v, t, tau) {
+          const alt = 1850 - 6.8 * (tau % 200);
+          surfaceFrame(t, 1.4, -84); attitude(t, 115, 86, 12 * Math.sin(tau * 0.7));
+          t.surfacePrograde.copy(t.up).negate().addScaledVector(t.east, 0.08).normalize();
+          orbitVectors(t, v, 175, 90, -2);
+          const a = atmo(alt);
+          t.situation = 'FLYING'; t.altitude = alt; t.radarAltitude = alt - 3;
+          Object.assign(t, { surfaceSpeed: 6.9, orbitalSpeed: 176, verticalSpeed: -6.8, horizontalSpeed: 1.1, gForce: 1.0 + Math.sin(tau * 2) * 0.03, mach: 0.02,
+            dynamicPressure: 0.03, staticPressure: a.p, density: a.rho, heatRatio: 0.18, reentryIntensity: 0, apoapsis: alt, periapsis: -598000, timeToAp: 0, timeToPe: 800,
+            inclination: 1.4, eccentricity: 0.99, period: 1600, thrust: 0, maxThrust: 0, twr: 0, maxTwr: 0, stageDeltaV: 0, totalDeltaV: 0 });
+        },
+      },
+      landed: {
+        bg: 'sea',
+        setup(v) { PHASES.chute.setup(v); game.ut = BASE_UT + 4800; for (const p of v.parts) if (p.chute) p.chute.state = 'cut'; },
+        tick(v, t, tau) {
+          surfaceFrame(t, 1.4, -84); attitude(t, 115, 84, 8 * Math.sin(tau * 0.9));
+          t.situation = tau < 0.3 ? 'FLYING' : 'SPLASHED'; t.altitude = 0.4; t.radarAltitude = 0.4;
+          orbitVectors(t, v, 175, 90, 0);
+          t.surfacePrograde.copy(t.east);
+          Object.assign(t, { surfaceSpeed: 0.3, orbitalSpeed: 175, verticalSpeed: 0.1 * Math.sin(tau), horizontalSpeed: 0.3, gForce: 1 + Math.sin(tau * 1.3) * 0.05, mach: 0,
+            dynamicPressure: 0, staticPressure: 101.3, density: 1.22, heatRatio: 0.12, apoapsis: 0.4, periapsis: -599000, inclination: 1.4, eccentricity: 0.99, period: 1600,
+            thrust: 0, maxThrust: 0, twr: 0, maxTwr: 0, stageDeltaV: 0, totalDeltaV: 0 });
+        },
+      },
+      destroyed: {
+        bg: 'boom',
+        setup(v) {
+          PHASES.reentry.setup(v);
+          PHASES.reentry.tick(v, v.telemetry, 3);
+          v.destroyed = true; v.parts = [];
+          bus.emit('vessel:destroyed', { vessel: v });
+          hud.showMessage('Rapid unplanned disassembly', 6, 'bad');
+        },
+        tick() { /* telemetry frozen */ },
+        after(v) { v.destroyed = false; },
+      },
+      probe: {
+        bg: 'moon',
+        probe: true,
+        setup(v) {
+          v.bodyId = 'lune'; v.controls.sas = true; v.controls.sasMode = 'normal'; v.controls.throttle = 0; v.controls.precision = true;
+          game.ut = BASE_UT + 21600 * 3 + 777; v.history.launchUT = BASE_UT;
+          v.target = { type: 'body', id: 'verda' };
+        },
+        tick(v, t, tau) {
+          const RL = 200000;
+          const lon = 20 + tau * 0.4;
+          const d = latLonToDir(3, lon); t.up.set(d.x, d.y, d.z);
+          const la = 3 * Math.PI / 180, lo = lon * Math.PI / 180;
+          t.north.set(-Math.sin(la) * Math.cos(lo), Math.cos(la), Math.sin(la) * Math.sin(lo)); t.east.crossVectors(t.north, t.up).normalize();
+          t.bodyId = 'lune'; t.bodyName = 'Lune'; t.situation = 'ORBITING'; t.altitude = 31200; t.radarAltitude = 28400;
+          dirFrom(t, 80, 0, t.prograde); v.pos.copy(t.up).multiplyScalar(RL + 31200); v.vel.copy(t.prograde).multiplyScalar(540);
+          t.normal.crossVectors(v.pos, v.vel).normalize(); t.radialOut.crossVectors(t.prograde, t.normal).normalize();
+          t.forward.copy(t.normal); t.top.copy(t.up).addScaledVector(t.normal, -t.up.dot(t.normal)).normalize(); t.right.crossVectors(t.forward, t.top).normalize();
+          t.surfacePrograde.copy(t.prograde);
+          Object.assign(t, { surfaceSpeed: 531, orbitalSpeed: 540, verticalSpeed: -2, horizontalSpeed: 531, gForce: 0, staticPressure: 0, density: 0, mach: 0, dynamicPressure: 0,
+            heatRatio: 0, electricCharge: 0.07, apoapsis: 38100, periapsis: 29800, timeToAp: 610, timeToPe: 1840, inclination: 6.2, eccentricity: 0.035, period: 2460,
+            thrust: 0, maxThrust: 20000, twr: 0, maxTwr: 1.9, stageDeltaV: 3120, totalDeltaV: 3120 });
+        },
+      },
+      // Final approach on Lune: landing aids strip (slope, impact, suicide-burn countdown, drift), auto radar altimeter.
+      landing: {
+        bg: 'moon',
+        lander: true,
+        setup(v) {
+          v.bodyId = 'lune'; v.stageTo(2); v.controls.sas = true; v.controls.sasMode = 'retrograde'; v.controls.gear = true; v.controls.throttle = 0;
+          game.ut = BASE_UT + 21600 * 2 + 400; v.history.launchUT = BASE_UT;
+          for (const p of v.parts) if (p.legs) { p.legs.deployed = true; p.legs.t = 1; }
+          setFuel(v, ['tank_t800'], 0.35);
+        },
+        tick(v, t, tau) {
+          const RL = 200000, k = tau % 60;
+          const vd = Math.max(4, 52 + 1.63 * k - (k > 24 ? 7.5 * (k - 24) : 0));            // coast, then brake from T+24 s
+          const radar = Math.max(6, 2700 - 52 * k - 0.8 * k * k + (k > 24 ? 3.75 * (k - 24) * (k - 24) : 0));
+          surfaceFrame(t, 8.5, 23.2);
+          t.bodyId = 'lune'; t.bodyName = 'Lune'; t.situation = 'FLYING'; t.altitude = radar + 1830; t.radarAltitude = radar;
+          attitude(t, 90, 87, 0);
+          t.surfacePrograde.copy(t.up).multiplyScalar(-vd).addScaledVector(t.east, 2.4).normalize();
+          t.prograde.copy(t.surfacePrograde);
+          v.pos.copy(t.up).multiplyScalar(RL + t.altitude); v.vel.copy(t.surfacePrograde).multiplyScalar(Math.hypot(vd, 2.4));
+          t.normal.crossVectors(v.pos, v.vel).normalize(); t.radialOut.crossVectors(t.prograde, t.normal).normalize();
+          const burning = k > 24;
+          for (const p of v.parts) if (p.engine) { p.engine.active = true; p.engine.throttleEff = burning ? 1 : 0; }
+          v.controls.throttle = burning ? 1 : 0;
+          Object.assign(t, { surfaceSpeed: Math.hypot(vd, 2.4), orbitalSpeed: Math.hypot(vd, 2.4) + 5, verticalSpeed: -vd, horizontalSpeed: 2.4,
+            gForce: burning ? 0.95 : 0, staticPressure: 0, density: 0, mach: 0, dynamicPressure: 0, localGravity: 1.63, heatRatio: 0,
+            thrust: burning ? 60000 : 0, maxThrust: 60000, apoapsis: t.altitude, periapsis: -180000, timeToAp: 0, timeToPe: 70, inclination: 3.1,
+            eccentricity: 0.97, period: 1500, electricCharge: 0.9 });
+        },
+      },
+      // Touchdown on a slope: the lander leans further and further → "Tipping over" alert, lean readout in red.
+      touchdown: {
+        bg: 'moon',
+        lander: true,
+        setup(v) { PHASES.landing.setup(v); v.controls.sasMode = 'stability'; },
+        tick(v, t, tau) {
+          const RL = 200000;
+          surfaceFrame(t, 8.5, 23.2);
+          const landed = tau > 1.2;
+          const radar = landed ? 0.4 : 12 - 9.6 * tau;
+          const lean = landed ? Math.min(75, 6 + Math.max(0, tau - 2) * 9) : 4;
+          t.bodyId = 'lune'; t.bodyName = 'Lune'; t.situation = landed ? 'LANDED' : 'FLYING'; t.altitude = radar + 1830; t.radarAltitude = radar;
+          attitude(t, 90, 90 - lean, 0);
+          t.surfacePrograde.copy(t.up).negate().addScaledVector(t.east, 0.2).normalize(); t.prograde.copy(t.surfacePrograde);
+          v.pos.copy(t.up).multiplyScalar(RL + t.altitude); v.vel.copy(t.surfacePrograde).multiplyScalar(landed ? 0.2 : 8);
+          for (const p of v.parts) if (p.engine) { p.engine.active = true; p.engine.throttleEff = 0; }
+          v.controls.throttle = 0;
+          Object.assign(t, { surfaceSpeed: landed ? 0.2 : 8, orbitalSpeed: 8, verticalSpeed: landed ? 0 : -8, horizontalSpeed: landed ? 0.2 : 0.6,
+            gForce: 0.17, staticPressure: 0, density: 0, mach: 0, dynamicPressure: 0, localGravity: 1.63, heatRatio: 0, thrust: 0, maxThrust: 60000,
+            apoapsis: t.altitude, periapsis: -199000, timeToAp: 0, timeToPe: 5, inclination: 3, eccentricity: 1, period: 0, electricCharge: 0.9 });
+        },
+      },
+      // A 12 000 × 24 000 km orbit: the mini orbit diagram must stay inside the panel.
+      highorbit: {
+        bg: 'space',
+        setup(v) { PHASES.orbit.setup.call(PHASES.orbit, v); v.maneuverNodes = []; v.target = null; },
+        tick(v, t, tau) {
+          PHASES.orbit.tick.call(PHASES.orbit, v, t, tau);
+          Object.assign(t, { altitude: 12000000, radarAltitude: 12000000, apoapsis: 23996000, periapsis: 12000000, timeToAp: 520000, timeToPe: 1040000 - tau,
+            eccentricity: 0.3225, period: 1040000, orbitalSpeed: 609, surfaceSpeed: 3065, horizontalSpeed: 3065, verticalSpeed: 0 });
+        },
+      },
+      // A burn flown to completion with a small overshoot: the cue must stay "Node complete", SAS maneuver → hold.
+      nodedone: {
+        bg: 'space',
+        setup(v) { PHASES.burn.setup.call(PHASES.burn, v); v.maneuverNodes[0].ut = game.ut + 4; },
+        tick(v, t, tau) {
+          PHASES.orbit.tick.call(PHASES.orbit, v, t, tau);
+          const node = v.maneuverNodes[0];
+          if (!node) return;
+          _tmp.copy(t.prograde);
+          const rem = tau < 1.6 ? 40 - tau * 24.5 : -4.6;              // remaining Δv along the burn; negative = overshoot
+          node.targetVel.copy(v.vel).addScaledVector(_tmp, rem);
+          t.forward.copy(_tmp); t.top.copy(t.radialOut); t.right.crossVectors(t.forward, t.top).normalize();
+          for (const p of v.parts) if (p.engine && p.stage === 2) { p.engine.active = true; p.engine.throttleEff = tau < 1.7 ? 1 : 0; }
+          Object.assign(t, { gForce: tau < 1.7 ? 1.7 : 0, thrust: tau < 1.7 ? 250000 : 0, twr: 1.7 });
+        },
+      },
+      // Recovery: after "Recover vessel" the vessel is removed — the HUD fades out (no red NO SIGNAL / Vessel lost).
+      recovered: {
+        bg: 'sea',
+        setup(v) { PHASES.landed.setup(v); },
+        tick(v, t, tau) {
+          PHASES.landed.tick(v, t, tau);
+          if (tau > 0.6 && flight.active === v) { flight.vessels = []; bus.emit('vessel:removed', { vessel: v }); flight.active = null; bus.emit('vessel:switched', { from: v, to: null }); }
+        },
+        after() { flight.active = vessel; flight.vessels = [vessel]; },
+      },
+      map: {
+        bg: 'map',
+        setup(v) { PHASES.orbit.setup.call(PHASES.orbit, v); hud.setMapMode(true); },
+        tick(v, t, tau) { PHASES.orbit.tick.call(PHASES.orbit, v, t, tau); },
+        after() { hud.setMapMode(false); },
+      },
+    };
+
+    // ───────────────────────── Crew gallery (#crew): every Tinynaut mood side by side, large ─────────────────────────
+    let gallery = null;
+    function buildGallery() {
+      const moods = [
+        { label: 'Calm', t: { situation: 'PRELAUNCH', gForce: 1, density: 1.2, altitude: 70 } },
+        { label: 'Thrilled', pre: 'PRELAUNCH', t: { situation: 'FLYING', gForce: 2.1, thrust: 1, maxThrust: 1, density: 0.9, mach: 0.5, altitude: 900, radarAltitude: 900 } },
+        { label: 'Terrified', t: { situation: 'FLYING', gForce: 7.4, heatRatio: 0.92, reentryIntensity: 0.9, density: 0.02, altitude: 38000, dynamicPressure: 30 } },
+        { label: 'Floating', t: { situation: 'ORBITING', gForce: 0, altitude: 85000 } },
+        { label: 'Sleepy', t: { situation: 'ORBITING', gForce: 0, altitude: 85000 }, opts: { warpRate: 1000, warpMode: 'rails' } },
+        { label: 'Relieved', pre: 'FLYING', t: { situation: 'SPLASHED', gForce: 1, density: 1.2, altitude: 0 } },
+        { label: 'Signal lost', t: { situation: 'FLYING', gForce: 1 }, opts: { lost: true } },
+        { label: 'Probe', probe: true, t: { situation: 'ORBITING', gForce: 0, altitude: 30000 } },
+      ];
+      const names = ['Jebbo Tinyman', 'Bilby Tinyman', 'Valla Tinyman', 'Pim Tinyman', 'Zuzu Tinyman', 'Orla Tinyman', 'Kip Tinyman', 'Octo'];
+      const wrap = document.createElement('div');
+      wrap.className = 'hud';
+      wrap.style.cssText = 'position:fixed;inset:0;z-index:20;pointer-events:auto;display:grid;grid-template-columns:repeat(4,300px);gap:26px 20px;justify-content:center;align-content:center';
+      const items = moods.map((m, i) => {
+        const cp = new CrewPortraits();
+        cp.setCrew(m.probe ? [] : [{ id: 'g' + i, name: names[i], role: ['Pilot', 'Engineer', 'Scientist'][i % 3], courage: 0.5, stupidity: 0.5 }], { probeName: m.probe ? 'Octo Probe Core' : null });
+        cp.setTitle(m.label); cp.setScale(2.6);
+        cp.root.style.cssText = 'zoom:2.2';
+        cp.titleEl.style.maxWidth = '100px'; cp.countEl.style.display = 'none';
+        const cell = document.createElement('div');
+        cell.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:6px';
+        cell.append(cp.root);
+        wrap.append(cell);
+        if (m.pre) cp.update(0.1, { ...m.t, situation: m.pre }, m.opts || {});
+        return { cp, m };
+      });
+      document.body.append(wrap);
+      return { wrap, items };
+    }
+    function tickGallery(dt) {
+      for (const { cp, m } of gallery.items) cp.update(dt, m.t, m.opts || {});
+    }
+
+    // ───────────────────────── Real physics (#real): the actual FlightSim + orbiter_1, launched and flown ─────────────────────────
+    let real = null;
+    async function startReal() {
+      const [{ FlightSim }, { getStockCraft }] = await Promise.all([import('../src/physics/flight.js'), import('../src/game/stockCrafts.js')]);
+      game.ut = BASE_UT;
+      const sim = new FlightSim(game);
+      const v = sim.launch(getStockCraft('orbiter_1'), { crew: [{ id: 'r1', name: 'Zeb Tinyman', role: 'Pilot', courage: 0.5, stupidity: 0, badass: true, color: '#ff8a3d' }] });
+      v.setControl('sas', true);
+      v.controls.throttle = 1;
+      real = { sim, v, t: 0, staged: false };
+      flight.active = v; flight.vessels = sim.vessels;
+      flight.setWarp = (i) => sim.setWarp(i);
+      flight.warpTo = (ut) => sim.warpTo(ut);
+      Object.defineProperty(flight, 'warp', { get: () => sim.warp, configurable: true });
+      window.__real = real;
+    }
+    function tickReal(dt) {
+      real.t += dt;
+      if (!real.staged && real.t > 1) { real.staged = true; real.sim.stage(); }
+      real.sim.update(dt);
+      flight.active = real.sim.active;
+    }
+
+    function setPhase(name) {
+      if (!PHASES[name] && name !== 'crew' && name !== 'real') name = 'ascent';
+      if (name === 'real') {
+        document.body.dataset.bg = 'ascent';
+        startReal().then(() => { for (let i = 0; i < 150; i++) { tickReal(1 / 30); hud.update(1 / 30); } })
+          .catch((e) => { console.error('real physics phase failed', e); hud.showMessage('Physics modules unavailable', 5, 'bad'); });
+        return;
+      }
+      if (gallery) { gallery.wrap.remove(); gallery = null; hud.setVisible(true); }
+      if (name === 'crew') {
+        hud.setVisible(false);
+        document.body.dataset.bg = 'space';
+        gallery = buildGallery();
+        for (let i = 0; i < 150; i++) tickGallery(1 / 30);
+        return;
+      }
+      if (phase?.after) phase.after(vessel);
+      flight.warp = { index: 0, rate: 1, mode: 'rails' };
+      flight.denyWarp = null; flight.physicsWarp = false;
+      phaseName = name; phase = PHASES[name]; tau = 0;
+      vessel = new MockVessel({ probe: !!phase.probe, lander: !!phase.lander });
+      flight.vessels = [vessel]; flight.active = vessel;
+      if (name === 'ascent' || name === 'liftoff' || name === 'chute') flight.physicsWarp = true;          // atmosphere → physics warp only
+      if (name === 'reentry') flight.denyWarp = 'Cannot time warp while re-entering the atmosphere';
+      document.body.dataset.bg = phase.bg;
+      phase.setup.call(phase, vessel);
+      phase.tick.call(phase, vessel, vessel.telemetry, 0);
+      common(vessel.telemetry, vessel);
+      // Pre-roll a few simulated seconds so expressions / smoothing reach a steady state even when the (software-rendered)
+      // headless browser only manages a couple of frames per second.
+      const preroll = Number(new URLSearchParams(location.search).get('preroll') ?? 4);
+      if (hud) for (let i = 0, n = Math.round(preroll * 30); i < n; i++) {
+        tau += 1 / 30; game.ut += (flight.warp.rate || 1) / 30;
+        phase.tick.call(phase, vessel, vessel.telemetry, tau);
+        if (!vessel.destroyed) common(vessel.telemetry, vessel);
+        hud.update(1 / 30);
+      }
+    }
+
+    // ───────────────────────── Boot ─────────────────────────
+    await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 2500))]);
+    try { await Promise.race([document.fonts.load('700 50px "JetBrains Mono"'), new Promise((r) => setTimeout(r, 2000))]); } catch { /* offline */ }
+    await Promise.race([FlightHUD.ready(), new Promise((r) => setTimeout(r, 4000))]);   // ΔV / terrain / nav-mode helpers
+    const app = { uiRoot: document.getElementById('ui-root'), game };
+    game.flight = flight;
+    const events = { mapToggles: 0, pauses: 0, recovers: 0, uiClicks: 0 };
+    bus.on('ui:click', () => events.uiClicks++);
+    let hud = new FlightHUD(app, { flight, onMapToggle: () => events.mapToggles++, onPause: () => events.pauses++, onRecover: () => events.recovers++ });
+    setPhase(location.hash.slice(1) || 'ascent');
+    window.addEventListener('hashchange', () => setPhase(location.hash.slice(1)));
+    window.addEventListener('keydown', (e) => {
+      const names = Object.keys(PHASES);
+      const i = Number(e.key);
+      if (i >= 1 && i <= names.length) location.hash = names[i - 1];
+    });
+
+    let last = performance.now(), frames = 0;
+    const perf = { frames: 0, updateMs: 0, maxMs: 0, navMs: 0, crewMs: 0 };
+    window.__perf = perf;
+    function loop(now) {
+      const dt = Math.min(0.1, (now - last) / 1000); last = now;
+      tau += dt;
+      game.ut += dt * (flight.warp.rate || 1);
+      if (gallery) { tickGallery(dt); requestAnimationFrame(loop); if (++frames === 20) window.__testReady = true; return; }
+      if (location.hash === '#real') {
+        try { if (real) tickReal(dt); hud.update(dt); } catch (e) { console.error(e); }
+        if (++frames === 20) window.__testReady = true;
+        requestAnimationFrame(loop); return;
+      }
+      try {
+        phase.tick.call(phase, vessel, vessel.telemetry, tau);
+        if (!vessel.destroyed) common(vessel.telemetry, vessel);
+        const t0 = performance.now();
+        hud.update(dt);
+        const ms = performance.now() - t0;
+        perf.frames++; perf.updateMs += ms; perf.maxMs = Math.max(perf.maxMs, ms);
+      } catch (e) { console.error(e); }
+      if (++frames === 20) window.__testReady = true;
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    // ───────────────────────── Self test (node tools/snap.mjs tests/hud.html --eval "window.__hudTest.selfTest()") ─────────────────────────
+    function selfTest() {
+      const results = [];
+      const check = (name, cond, info) => results.push({ name, ok: !!cond, ...(info !== undefined ? { info } : {}) });
+      const nb = hud.navball;
+      const t = vessel.telemetry;
+      // 1. Navball projection: nose at center, top up, right right; ball rotation consistent with projection
+      nb.setAttitude(t);
+      const pf = nb.project(t.forward.clone(), new THREE.Vector3()), pt = nb.project(t.top.clone(), new THREE.Vector3()), pr = nb.project(t.right.clone(), new THREE.Vector3());
+      check('forward → center', pf.distanceTo(new THREE.Vector3(0, 0, 1)) < 1e-6, pf.toArray());
+      check('top → screen up', pt.distanceTo(new THREE.Vector3(0, 1, 0)) < 1e-6, pt.toArray());
+      check('right → screen right', pr.distanceTo(new THREE.Vector3(1, 0, 0)) < 1e-6, pr.toArray());
+      let maxErr = 0;
+      for (let i = 0; i < 40; i++) {
+        attitude(t, Math.random() * 360, Math.random() * 178 - 89, Math.random() * 360 - 180);
+        nb.setAttitude(t);
+        // ball-local of world d: north → −X, east → +Z, up → +Y (navball.js header)
+        for (const d of [t.up, t.north, t.east, dirFrom(t, Math.random() * 360, Math.random() * 180 - 90, new THREE.Vector3())]) {
+          const bl = new THREE.Vector3(-d.dot(t.north), d.dot(t.up), d.dot(t.east));
+          const viaMesh = bl.applyQuaternion(nb.ball.quaternion);
+          const viaProj = nb.project(d, new THREE.Vector3());
+          maxErr = Math.max(maxErr, viaMesh.distanceTo(viaProj));
+        }
+        const hd = ((nb.heading - t.heading) % 360 + 540) % 360 - 180;
+        maxErr = Math.max(maxErr, Math.abs(hd) / 1000, Math.abs(nb.pitch - t.pitch) / 1000);
+      }
+      check('ball texture rotation matches projection (and heading/pitch readouts)', maxErr < 1e-4, maxErr);
+      // Texture convention: u = heading/360, so heading 90 (east) is at u = 0.25 on three's SphereGeometry → (0,0,+1) = +Z ✓ (ball-local east)
+      const g = new THREE.SphereGeometry(1, 64, 32); const uv = g.attributes.uv, pos = g.attributes.position;
+      let found = null;
+      for (let i = 0; i < uv.count; i++) if (Math.abs(uv.getX(i) - 0.25) < 1e-6 && Math.abs(uv.getY(i) - 0.5) < 1e-6) found = [pos.getX(i), pos.getY(i), pos.getZ(i)];
+      g.dispose();
+      check('u=0.25 (heading 90 in texture) maps to ball-local +Z (east)', found && Math.abs(found[2] - 1) < 1e-6, found);
+      // Pad attitude (belly east, top west): nose at the center, east straight down the screen (W tips the nose east)
+      const tp = { up: t.up.clone(), north: t.north.clone(), east: t.east.clone(), forward: new THREE.Vector3(), top: new THREE.Vector3(), right: new THREE.Vector3() };
+      attitude(tp, 90, 90); nb.setAttitude(tp);
+      const pe = nb.project(tp.east, new THREE.Vector3()), pn = nb.project(tp.north, new THREE.Vector3());
+      check('pad: east is screen-down, north screen-left (pilot view, +X = south = right)', pe.y < -0.99 && pn.x < -0.99, [pe.toArray(), pn.toArray()]);
+      nb.setAttitude(t);
+
+      // 2. Robustness: missing / garbage telemetry never throws
+      const saved = vessel.telemetry;
+      const errsBefore = hud._errors.size;
+      let threw = null;
+      try {
+        vessel.telemetry = {}; hud.update(0.016);
+        vessel.telemetry = null; hud.update(0.016);
+        vessel.telemetry = { altitude: NaN, apoapsis: Infinity, periapsis: NaN, forward: { x: NaN, y: 0, z: 0 }, up: null, resources: { LiquidFuel: { amount: NaN, max: 0 } }, situation: 'WHAT' }; hud.update(0.016);
+        const savedActive = flight.active; flight.active = null; hud.update(0.016); flight.active = savedActive;
+        const gs = vessel.getStages, ce = console.error; console.error = () => {};   // expected, silenced failure
+        vessel.getStages = () => { throw new Error('injected getStages failure'); }; hud._stagesDirty = true; hud.update(0.3);
+        vessel.getStages = gs; console.error = ce;
+        hud.update(-5); hud.update(NaN); hud.update(undefined);
+      } catch (e) { threw = String(e); }
+      vessel.telemetry = saved; hud._stagesDirty = true; hud.update(0.3);
+      check('no throw on empty/null/NaN telemetry, null active vessel, failing getStages', !threw, threw);
+      check('no section errors logged by bad telemetry', hud._errors.size === errsBefore || [...hud._errors].every((k) => k === 'getStages'), [...hud._errors]);
+
+      // 3. Controls
+      const clicks0 = events.uiClicks;
+      const sas0 = vessel.controls.sas;
+      hud.sasBtn.click();
+      check('SAS button toggles via setControl', vessel.controls.sas === !sas0);
+      hud.sasBtn.click();
+      hud.modeBtns.retrograde.click();
+      check('SAS mode button sets controls.sasMode', vessel.controls.sasMode === 'retrograde' && vessel.controls.sas === true);
+      const hadNodes = vessel.maneuverNodes; vessel.maneuverNodes = []; hud.update(0.016);
+      hud.modeBtns.maneuver.click();
+      check('maneuver mode unavailable without node', vessel.controls.sasMode === 'retrograde' && hud.modeBtns.maneuver.classList.contains('unavailable'));
+      vessel.maneuverNodes = hadNodes; hud.update(0.016);
+      const gear0 = vessel.controls.gear; hud.gearBtn.click();
+      check('gear indicator toggles', vessel.controls.gear === !gear0); hud.gearBtn.click();
+      flight.calls.length = 0; hud.warpChevs[3].click();
+      check('warp chevron calls flight.setWarp(3)', flight.calls.some((c) => c[0] === 'setWarp' && c[1] === 3));
+      hud.warpChevs[0].click();
+      check('buttons emit ui:click', events.uiClicks - clicks0 >= 7, events.uiClicks - clicks0);
+      const m0 = hud.speedMode; hud.cycleSpeedMode();
+      check('speed mode cycles', hud.speedMode !== m0, [m0, hud.speedMode]); hud.cycleSpeedMode(); hud.cycleSpeedMode();
+      // Speed frame ↔ vessel navMode (SAS prograde/retrograde follow the marker the player sees)
+      {
+        const saved = { alt: t.altitude, sit: t.situation };
+        vessel.controls.navMode = 'auto'; hud.update(0.016);
+        const auto0 = hud.speedMode;
+        const seq = [];
+        for (let i = 0; i < 3; i++) { hud.cycleSpeedMode(); hud.update(0.016); seq.push([hud.speedMode, vessel.controls.navMode]); }
+        const okSeq = seq.every(([m, n]) => (n === 'auto' ? m === auto0 : n === m));
+        check('speed-mode click sets vessel navMode (auto when equal to the automatic mode)', okSeq && seq.some(([, n]) => n !== 'auto'), { auto0, seq });
+        // manual Surface above the switch altitude → reset to auto when the automatic mode flips
+        vessel.controls.navMode = 'auto'; t.altitude = 90000; hud.update(0.016);
+        for (let i = 0; i < 4 && hud.speedMode !== 'surface'; i++) { hud.cycleSpeedMode(); hud.update(0.016); }
+        const manual = vessel.controls.navMode;
+        const ph = phase.tick; phase.tick = () => {}; t.altitude = 20000; hud.update(0.016); phase.tick = ph;
+        check('manual surface/orbit choice resets to auto at the automatic switch (35 km on Verda)', manual === 'surface' && vessel.controls.navMode === 'auto' && hud.speedMode === 'surface', { manual, after: vessel.controls.navMode, mode: hud.speedMode });
+        t.altitude = saved.alt; vessel.controls.navMode = 'auto'; hud.update(0.016);
+      }
+      // 4. Map mode & message
+      hud.setMapMode(true); const mm = hud.root.classList.contains('map-mode'); hud.setMapMode(false);
+      check('setMapMode toggles compact layout', mm && !hud.root.classList.contains('map-mode'));
+      hud.showMessage('Self test', 0.8);
+      check('showMessage sets text', hud.msgText.textContent === 'Self test');
+      // 4b. Instruments
+      {
+        const ph = phase.tick; phase.tick = () => {};
+        const keep = vessel.keepTemps; vessel.keepTemps = true;
+        // HEAT: every part at 288 K reads 0 %, a part at 90 % of its range above ambient reads 90 % + Overheat
+        for (const p of vessel.parts) p.temp = 288;
+        hud.update(0.3);
+        const cold = hud.gHeat.val.textContent;
+        const hot = vessel.parts[1]; hot.temp = 300 + 0.9 * ((hot.def.maxTemp || 2000) - 300);
+        hud.update(0.3);
+        const warmTxt = hud.gHeat.val.textContent, alertOn = !hud.alerts.heat.hidden;
+        check('HEAT gauge: 0 % at ambient, 90 % near the limit (+ Overheat alert)', cold === '0%' && warmTxt === '90%' && alertOn, { cold, warmTxt, alertOn });
+        for (const p of vessel.parts) p.temp = 288;
+        vessel.keepTemps = keep;
+        // Altimeter at rest on a fractional altitude: every wheel shows a whole digit (no half-rolled 7/8)
+        const alt0 = t.altitude, sit0 = t.situation;
+        t.altitude = 79.512; t.radarAltitude = 5.2;
+        hud.odo.reset();
+        for (let i = 0; i < 12; i++) hud.update(0.05);
+        const strips = [...hud.root.querySelectorAll('.hud-odo-strip')].map((e) => parseFloat(/,\s*(-?[\d.]+)em/.exec(e.style.transform)?.[1] ?? '0'));
+        check('altimeter at rest shows whole digits (79.5 m → 80)', strips.every((x) => Math.abs(x - Math.round(x)) < 1e-6) && strips.slice(-2).join() === '-8,0', strips);
+        t.altitude = alt0;
+        // Chutes: a semi chute below safeSpeed is fine; above safeSpeed near its deploy altitude it is unsafe
+        const ch = vessel.parts.find((p) => p.chute);
+        const cs0 = ch.chute.state, sp0 = t.surfaceSpeed, r0 = t.radarAltitude, P0 = t.staticPressure;
+        ch.chute.state = 'semi'; Object.assign(t, { surfaceSpeed: 278, radarAltitude: 3800, staticPressure: 60 }); hud.update(0.12);
+        const fine = hud.alerts.chute.hidden;
+        Object.assign(t, { surfaceSpeed: 340, radarAltitude: 1300 }); hud.update(0.12);
+        const unsafe = !hud.alerts.chute.hidden;
+        ch.chute.state = 'armed'; Object.assign(t, { surfaceSpeed: 900, radarAltitude: 20000 }); hud.update(0.12);
+        const waiting = hud.alerts.chute.hidden && !hud.alerts.chuteWait.hidden;
+        ch.chute.state = cs0; Object.assign(t, { surfaceSpeed: sp0, radarAltitude: r0, staticPressure: P0 }); hud.update(0.12);
+        check('chute alerts: semi at 278 m/s OK, semi at 340 m/s near deploy altitude unsafe, armed + fast = "armed" info', fine && unsafe && waiting, { fine, unsafe, waiting });
+        // Mini orbit diagram stays inside its box on a 12 000 × 24 000 km orbit
+        const o0 = { ap: t.apoapsis, pe: t.periapsis, e: t.eccentricity, P: t.period, sit: t.situation };
+        Object.assign(t, { apoapsis: 23996000, periapsis: 12000000, eccentricity: 0.3225, period: 1040000, situation: 'ORBITING' }); hud.update(0.12);
+        const sb = hud.orbitSvg.getBoundingClientRect(), pb = hud.oPath.getBoundingClientRect();
+        const inside = pb.width > 10 && pb.left >= sb.left - 1 && pb.right <= sb.right + 1 && pb.top >= sb.top - 1 && pb.bottom <= sb.bottom + 1;
+        check('mini orbit diagram stays inside the panel on a 12 000 km orbit', inside, { svg: [sb.left, sb.top, sb.width, sb.height].map(Math.round), path: [pb.left, pb.top, pb.width, pb.height].map(Math.round) });
+        Object.assign(t, { apoapsis: o0.ap, periapsis: o0.pe, eccentricity: o0.e, period: o0.P, situation: o0.sit }); hud.update(0.12);
+        // Pad: no orbital elements, launch-stage TWR instead of 0.00
+        Object.assign(t, { situation: 'PRELAUNCH', staticPressure: 101.3, thrust: 0, maxThrust: 0 }); vessel.situation = 'PRELAUNCH';
+        const cs1 = vessel.currentStage; vessel.stageTo(5); vessel.currentStage = 5; for (const p of vessel.parts) if (p.engine) p.engine.active = false;
+        hud._stagesDirty = true; hud.update(0.3); hud.update(0.12);
+        const padEcc = hud.kEcc.v.textContent, padInc = hud.kInc.v.textContent, padTwr = hud.kTwr.v.textContent;
+        check('pad: inclination/eccentricity "—", TWR shows the launch stage (not 0.00 / 0.00)', padEcc === '—' && padInc === '—' && !/\/ 0\.00$/.test(padTwr), { padEcc, padInc, padTwr });
+        const stageDv = [...hud.root.querySelectorAll('.hud-stage-meta .dv')].map((e) => e.textContent).filter(Boolean);
+        check('staging shows vacuum ΔV by default (VAB numbers) with TWR per stage', hud.dvMode !== 'vac' || (stageDv.length > 0 && !!hud.root.querySelector('.hud-stage-aux .twr:not([hidden])')), stageDv);
+        vessel.stageTo(cs1); t.situation = sit0; vessel.situation = sit0;
+        phase.tick = ph; hud._stagesDirty = true; hud.update(0.3);
+      }
+      // Maneuver node: "done" latches through a small overshoot, SAS maneuver → stability hold
+      {
+        const ph = phase.tick; phase.tick = () => {};
+        const saved = { nodes: vessel.maneuverNodes, bvFn: hud._burnVector, sas: vessel.controls.sas, mode: vessel.controls.sasMode };
+        const dir = t.prograde.clone();
+        let rem = 300;
+        vessel.maneuverNodes = [{ id: 'selftest', ut: game.ut + 5, dv: { prograde: 300, normal: 0, radial: 0 }, targetVel: null, bodyId: 'verda' }];
+        hud._burnVector = () => new THREE.Vector3().copy(dir).multiplyScalar(rem);
+        vessel.controls.sas = true; vessel.controls.sasMode = 'maneuver';
+        const states = [];
+        for (const r of [300, 150, 20, 0.6, -0.9, -2.5]) { rem = r; hud.update(0.12); states.push(hud.nodeCue.dataset.state); }
+        const latched = states.slice(-2).every((x) => x === 'done');
+        check('node cue stays "done" after an overshoot and SAS leaves maneuver mode', latched && vessel.controls.sasMode === 'stability' && !hud.nodeDelBtn.hidden, { states, sasMode: vessel.controls.sasMode });
+        vessel.maneuverNodes = saved.nodes; hud._burnVector = saved.bvFn; vessel.controls.sas = saved.sas; vessel.controls.sasMode = saved.mode;
+        phase.tick = ph; hud.update(0.12);
+      }
+      // Recovery: removing the active (intact) vessel fades the HUD instead of the red "signal lost" state
+      {
+        const act = flight.active, list = flight.vessels;
+        bus.emit('vessel:removed', { vessel: act }); flight.active = null; flight.vessels = [];
+        hud.update(0.3); hud.update(0.3);
+        const ended = hud.root.classList.contains('ended'), lostCls = hud.root.classList.contains('lost'), nosig = !hud.noSignal.hidden;
+        const stageTxt = hud.stageList.textContent;
+        flight.active = act; flight.vessels = list; hud.update(0.3);
+        check('recovered vessel: HUD "ended" (fades), not "lost" / NO SIGNAL', ended && !lostCls && !nosig && !/lost/i.test(stageTxt) && !hud.root.classList.contains('ended'), { ended, lostCls, nosig, stageTxt });
+      }
+
+      // 5. Dispose & recreate
+      let disposeErr = null;
+      try {
+        const h2 = new FlightHUD(app, { flight }); h2.update(0.016); h2.update(0.3); h2.dispose();
+        check('dispose removes root', !document.body.contains(h2.root));
+      } catch (e) { disposeErr = String(e); }
+      check('construct/update/dispose second HUD', !disposeErr, disposeErr);
+      // 6. Cheap updates: steady state must not rewrite DOM text every frame
+      const mo = new MutationObserver(() => {}); let mutations = 0;
+      const mo2 = new MutationObserver((l) => { mutations += l.length; });
+      mo2.observe(hud.root, { subtree: true, childList: true, characterData: true, attributes: true });
+      const savedTick = phase.tick; phase.tick = () => {};
+      for (let i = 0; i < 5; i++) hud.update(0.016);
+      mo2.disconnect(); phase.tick = savedTick;
+      const recs = mutations;
+      check('steady-state frames touch (almost) no DOM', recs < 40, recs);
+      mo.disconnect();
+      // 7. Pointer events: empty screen areas (incl. the invisible message layer) must reach the 3D view
+      const probes = [[0.5, 0.26], [0.5, 0.45], [0.3, 0.5], [0.75, 0.6]];
+      const blocked = probes.filter(([x, y]) => hud.root.contains(document.elementFromPoint(innerWidth * x, innerHeight * y)));
+      check('empty areas are click-through', blocked.length === 0, blocked);
+      const sasHit = hud.sasBtn.getBoundingClientRect();
+      check('SAS button is clickable', hud.sasBtn.contains(document.elementFromPoint(sasHit.x + sasHit.width / 2, sasHit.y + sasHit.height / 2)));
+      return { ok: results.every((r) => r.ok), results };
+    }
+
+    window.__hudTest = { setPhase, selfTest, get hud() { return hud; }, get vessel() { return vessel; }, flight, events, PHASES: Object.keys(PHASES) };
+    window.__hud = hud;
+  </script>
+</body>
+</html>

@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Map view test — Tiny Space Program</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="../src/ui/base.css">
+  <script type="importmap">
+  { "imports": { "three": "../node_modules/three/build/three.module.js", "three/addons/": "../node_modules/three/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <canvas id="game-canvas" tabindex="0"></canvas>
+  <div id="ui-root"></div>
+  <div id="toast-root"></div>
+<!--
+  Standalone MapView test. URL parameters:
+    ?mode=tracking            tracking-station layout (vessel list, time warp)
+    &focus=<bodyId|vesselId>  initial focus          &dist=<km>   camera distance     &yaw=&pitch=  camera angles (rad)
+    &select=1                 select the maneuver node (gizmo + editor panel)
+    &nonode=1                 no maneuver node        &target=<bodyId|vesselId>   set the active vessel's target
+    &ut=<s>                   start time             &warp=<index>  initial warp
+    &scenario=suborbital|escape|lune|pad   other situations for the active vessel (no node)
+    &empty=1                  no vessels at all (tracking empty state / flight without active vessel)
+  window.map = the MapView, window.flight = the mock FlightSim, window.__testReady = true once set up & textures baked.
+-->
+<script type="module">
+import * as THREE from 'three';
+import { game } from '../src/core/state.js';
+import { bus } from '../src/core/events.js';
+import { input } from '../src/game/input.js';
+import { WARP_RATES } from '../src/core/constants.js';
+import { BODIES } from '../src/data/bodies.js';
+import '../src/ui/toast.js';
+import { Orbit } from '../src/physics/orbit.js';
+import * as U from '../src/physics/universe.js';
+import { createNode, setNodeDv, setNodeUT, nodeTrajectory } from '../src/game/maneuver.js';
+import { MapView } from '../src/ui/mapView.js';
+
+const qs = new URLSearchParams(location.search);
+const mode = qs.get('mode') === 'tracking' ? 'tracking' : 'flight';
+game.ut = Number(qs.get('ut') || 0);
+
+// ───── mock app (mirrors src/main.js) ─────
+const canvas = document.getElementById('game-canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.setSize(innerWidth, innerHeight, false);
+const shared = new Map();
+const app = {
+  renderer, canvas, uiRoot: document.getElementById('ui-root'), game, bus, input,
+  width: innerWidth, height: innerHeight, time: 0,
+  getShared: (k, f) => { if (!shared.has(k)) shared.set(k, f()); return shared.get(k); },
+  goto: () => {}, reportError: (e) => console.error(e),
+};
+
+// ───── mock vessels & FlightSim ─────
+let uid = 0;
+function engine(stage = 0) {
+  return { uid: 'e' + (++uid), stage, def: { id: 'lv909', modules: { engine: { thrustVac: 60, ispVac: 345, ispASL: 85 } } }, engine: { active: true, flameout: false } };
+}
+function orbitingVessel({ name, type = 'ship', bodyId = 'verda', alt = 100000, apo = null, inc = 0, lan = 0, argPe = 0, M0 = 0 }) {
+  const b = BODIES[bodyId];
+  const rp = b.radius + alt, ra = b.radius + (apo ?? alt);
+  const sma = (rp + ra) / 2, ecc = (ra - rp) / (ra + rp);
+  const orbit = new Orbit({ mu: b.mu, sma, ecc, inc: inc * Math.PI / 180, lan: lan * Math.PI / 180, argPe: argPe * Math.PI / 180, meanAnomalyAtEpoch: M0, epoch: 0 });
+  const v = {
+    id: 'v' + (++uid), name, type, bodyId, orbit, pos: new THREE.Vector3(), vel: new THREE.Vector3(), rot: new THREE.Quaternion(),
+    situation: 'ORBITING', maneuverNodes: [], target: null, onRails: true, destroyed: false, landedAt: null,
+    mass: 4200, parts: type === 'debris' ? [] : [engine(0)], currentStage: 0, crew: type === 'ship' ? [{ name: 'Jebby Tinyman' }] : [],
+    telemetry: { staticPressure: 0, stageDeltaV: 3200 },
+  };
+  orbit.getStateAtUT(game.ut, v.pos, v.vel);
+  if (!orbit.isBound) v.situation = 'ESCAPING';
+  else if (orbit.periapsis < b.radius + (b.atmosphere?.height ?? 0)) v.situation = 'SUB_ORBITAL';
+  return v;
+}
+function landedVessel({ name, bodyId, lat, lon, type = 'ship' }) {
+  const b = BODIES[bodyId];
+  const la = lat * Math.PI / 180, lo = lon * Math.PI / 180;
+  const fixed = new THREE.Vector3(Math.cos(la) * Math.cos(lo), Math.sin(la), -Math.cos(la) * Math.sin(lo)).multiplyScalar(b.radius + 800);
+  const v = orbitingVessel({ name, type, bodyId, alt: 100000 });
+  v.orbit = null; v.situation = 'LANDED'; v.onRails = false;
+  v.landedAt = { fixedPos: fixed, fixedRot: new THREE.Quaternion() };
+  v.pos.copy(fixed).applyQuaternion(U.rotationQuat(bodyId, game.ut));
+  v.vel.set(0, 0, 0);
+  return v;
+}
+
+// &scenario=suborbital | escape | lune | pad  — alternative situations for the active vessel
+const scenario = qs.get('scenario');
+let active;
+if (scenario === 'suborbital') active = orbitingVessel({ name: 'Tiny Explorer', alt: -250000, apo: 160000, argPe: 200 });
+else if (scenario === 'lune') active = orbitingVessel({ name: 'Tiny Explorer', bodyId: 'lune', alt: 30000, apo: 2600000, argPe: 90 });
+else if (scenario === 'pad') {
+  const site = { lat: -0.0972, lon: -74.5577 };
+  active = landedVessel({ name: 'Tiny Explorer', bodyId: 'verda', ...site });
+  active.situation = 'PRELAUNCH';
+} else if (scenario === 'escape') {
+  const b = BODIES.verda, r = b.radius + 100000;
+  const pos = new THREE.Vector3(r, 0, 0), vel = new THREE.Vector3(0, 0, -Math.sqrt(b.mu / r) * 1.52);
+  active = orbitingVessel({ name: 'Tiny Explorer', alt: 100000 });
+  active.orbit = Orbit.fromStateVectors(pos, vel, b.mu, game.ut); active.situation = 'ESCAPING';
+  active.orbit.getStateAtUT(game.ut, active.pos, active.vel);
+} else active = orbitingVessel({ name: 'Tiny Explorer', alt: 100000 });
+const vessels = [
+  active,
+  orbitingVessel({ name: 'Relay One', type: 'probe', alt: 2400000, inc: 28, lan: 40, M0: 2.2 }),
+  orbitingVessel({ name: 'Stage 2 Debris', type: 'debris', alt: 78000, apo: 190000, argPe: 150, M0: 4.1 }),
+  orbitingVessel({ name: 'Booster Nose', type: 'debris', alt: 60000, apo: 105000, argPe: 30, M0: 1.4 }),
+  orbitingVessel({ name: 'Pip Surveyor', type: 'probe', bodyId: 'pip', alt: 45000, apo: 90000, inc: 50, M0: 0.3 }),
+  orbitingVessel({ name: 'Rusta Pathfinder', type: 'probe', bodyId: 'rusta', alt: 300000, apo: 1200000, inc: 12, M0: 1.0 }),
+  landedVessel({ name: 'Lune Base Alpha', bodyId: 'lune', lat: 8, lon: 40 }),
+];
+if (qs.get('empty')) vessels.length = 0;      // &empty=1: nobody in flight (tracking empty state)
+const flight = {
+  vessels, active: qs.get('empty') ? null : active,
+  warp: { index: Number(qs.get('warp') || 0), rate: 1, mode: 'rails' },
+  setWarp(i) { this.warp.index = i; this.warp.rate = WARP_RATES[i]; bus.emit('warp:change', { index: i, rate: this.warp.rate, mode: 'rails' }); return { ok: true }; },
+  setActive(v) { const from = this.active; this.active = v; bus.emit('vessel:switched', { from, to: v }); },
+  removeVessel(v) { const i = this.vessels.indexOf(v); if (i >= 0) this.vessels.splice(i, 1); v.destroyed = true; bus.emit('vessel:removed', { vessel: v }); },
+  update(dt) {
+    game.ut += dt * this.warp.rate;
+    for (const v of this.vessels) {
+      if (v.orbit) v.orbit.getStateAtUT(game.ut, v.pos, v.vel);
+      else if (v.landedAt) v.pos.copy(v.landedAt.fixedPos).applyQuaternion(U.rotationQuat(v.bodyId, game.ut));
+    }
+  },
+};
+flight.warp.rate = WARP_RATES[flight.warp.index];
+game.flight = flight;
+
+// ───── a maneuver node that produces a Lune encounter (Pe ≈ 60 km) ─────
+let node = null;
+if (!qs.get('nonode') && !scenario && !qs.get('empty')) {
+  node = createNode(active, game.ut + 1800);
+  let best = null;
+  for (let t = game.ut + 1650; t <= game.ut + 2250; t += 20) {
+    for (let dv = 836; dv <= 872; dv += 3) {
+      setNodeUT(active, node, t); setNodeDv(active, node, { prograde: dv, normal: 0, radial: 0 });
+      const traj = nodeTrajectory(active);
+      const k = traj.findIndex(p => p.bodyId === 'lune');
+      if (k > 0) {
+        const pe = traj[k].orbit.periapsis - BODIES.lune.radius;
+        const score = Math.abs(pe - 60000);
+        if (pe > 5000 && (!best || score < best.score)) best = { t, dv, score, pe };
+      }
+    }
+  }
+  if (best) { setNodeUT(active, node, best.t); setNodeDv(active, node, { prograde: best.dv, normal: 0, radial: 0 }); console.log('encounter node', JSON.stringify(best)); }
+  else console.warn('no encounter found');
+}
+if (qs.get('target')) {
+  const t = qs.get('target');
+  active.target = BODIES[t] ? { type: 'body', id: t } : { type: 'vessel', id: vessels.find(v => v.name === t || v.id === t)?.id };
+}
+
+// ───── the map ─────
+const map = new MapView(app, { flight, mode, onSelectVessel: (v) => console.log('FLY', v.name), onExit: mode === 'tracking' ? () => console.log('EXIT') : null, bakeBudget: 40 });
+window.map = map; window.flight = flight; window.game = game; window.THREE = THREE;
+map.enter();
+map.onResize(innerWidth, innerHeight);
+if (mode === 'tracking') map._selectTracked(qs.get('selectVessel') ? vessels.find(v => v.name === qs.get('selectVessel'))?.id : active.id, false);
+if (qs.get('focus')) {
+  const f = qs.get('focus');
+  map.focus(BODIES[f] ? f : (vessels.find(v => v.name === f || v.id === f)?.id ?? f), { instant: true });
+}
+if (qs.get('dist')) { map.cam.tDist = map.cam.dist = Number(qs.get('dist')); }
+if (qs.get('yaw')) map.cam.yaw = map.cam.tYaw = Number(qs.get('yaw'));
+if (qs.get('pitch')) map.cam.pitch = map.cam.tPitch = Number(qs.get('pitch'));
+if (qs.get('select') && node) map.selectedNodeId = node.id;
+
+addEventListener('resize', () => {
+  app.width = innerWidth; app.height = innerHeight;
+  renderer.setSize(innerWidth, innerHeight, false);
+  map.onResize(innerWidth, innerHeight);
+});
+
+let last = performance.now(), frames = 0;
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now; app.time += dt;
+  flight.update(qs.get('freeze') ? 0 : dt);
+  map.update(dt);
+  if (!window.__nanLogged && !Number.isFinite(map.camera.position.x + map.origin.x)) {
+    window.__nanLogged = true;
+    console.error('NaN camera/origin', JSON.stringify({ frames, dt, ut: game.ut, cam: map.cam, origin: map.origin, focus: map.focusTarget, anim: !!map.focusAnim, vpos: active.pos }));
+  }
+  map.render();
+  input.endFrame();
+  frames++;
+  if (!window.__testReady && frames > 20 && map._bakeIdle?.()) window.__testReady = true;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

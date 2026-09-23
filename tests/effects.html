@@ -1,0 +1,802 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FX test — Tiny Space Program</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 10px; top: 8px; color: #e6eefc; font: 12px/1.45 ui-monospace, Menlo, monospace;
+         background: rgba(7, 11, 20, 0.55); padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(120,170,255,.25); }
+  #hud b { color: #ffb03f; }
+  #modes { position: fixed; right: 10px; top: 8px; display: flex; gap: 4px; flex-wrap: wrap; max-width: 60vw; justify-content: flex-end; }
+  #modes a { font: 600 12px system-ui, sans-serif; color: #e6eefc; text-decoration: none; background: rgba(22,34,54,.8);
+             border: 1px solid rgba(120,170,255,.4); border-radius: 6px; padding: 4px 8px; }
+  #modes a.on { background: #3fa9ff; color: #07101c; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js", "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="modes"></div>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { Effects } from '../src/render/effects.js';
+import { BODIES, LAUNCH_SITE, latLonToDir } from '../src/data/bodies.js';
+import { PARTS } from '../src/data/parts.js';
+import { bus } from '../src/core/events.js';
+
+const params = new URLSearchParams(location.search);
+const MODE = params.get('mode') || 'liftoff';
+if (MODE === 'atlas') {
+  // debug view of the procedural puff atlas: density (alpha), normals (rg), thickness (b)
+  const { buildPuffAtlasData } = await import('../src/render/particles.js');
+  const { data, size } = buildPuffAtlasData(256);
+  const c2 = document.createElement('canvas'); c2.width = size * 3; c2.height = size;
+  c2.style.cssText = 'position:fixed;left:0;top:60px;width:' + size * 3 * 1.6 + 'px;image-rendering:pixelated;background:#3a5f8f';
+  const g = c2.getContext('2d'), img = g.createImageData(size * 3, size);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const i = ((size - 1 - y) * size + x) * 4, a = data[i + 3] / 255;
+    const o1 = (y * size * 3 + x) * 4, o2 = o1 + size * 4, o3 = o2 + size * 4;
+    const nx = data[i] / 127.5 - 1, ny = data[i + 1] / 127.5 - 1, nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+    const lit = Math.max(0.3, 0.3 + 0.7 * Math.max(0, nx * 0.6 + ny * 0.5 + nz * 0.62)) * 235;
+    const bg = [58, 95, 143];
+    for (let k = 0; k < 3; k++) img.data[o1 + k] = bg[k] * (1 - a) + lit * a;
+    img.data[o2] = data[i]; img.data[o2 + 1] = data[i + 1]; img.data[o2 + 2] = 255;
+    img.data[o3] = img.data[o3 + 1] = img.data[o3 + 2] = data[i + 2];
+    img.data[o1 + 3] = img.data[o2 + 3] = img.data[o3 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  document.body.appendChild(c2);
+  window.__testReady = true;
+  throw new Error('atlas view (not an error)');
+}
+const WARM = Number(params.get('warm') || 0);
+const QUALITY = params.get('quality') || 'high';
+const BLOOM = params.get('bloom') !== '0';
+const FIXED = params.get('fixed') ? Number(params.get('fixed')) : 0;   // fixed sim dt per frame (deterministic shots)
+// ?real=1 → no mocks: Effects imports the real universe.js / terrain.js itself and gets true root-frame coordinates
+const REAL = params.get('real') === '1';
+const U = REAL ? await import('../src/physics/universe.js') : null;
+const bodyRoot = new THREE.Vector3();
+
+// ───────── renderer ─────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.3, 2e6);
+let composer = null;
+if (BLOOM) {
+  composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth / 2, innerHeight / 2), 0.55, 0.5, 0.85));
+  composer.addPass(new OutputPass());
+}
+
+// ───────── body / frames ─────────
+// ?body= for the landing / touchdown modes (verda | rusta | lune | pip)
+const LBODY = params.get('body') || 'verda';
+const cfg = {
+  liftoff: { body: 'verda', biome: 'Launch Site' }, ascent: { body: 'verda' }, explosion: { body: 'verda', biome: 'Launch Site' }, reentry: { body: 'verda' },
+  vapor: { body: 'verda' }, splash: { body: 'verda', water: true }, dust: { body: 'lune' }, decouple: { body: 'verda' },
+  heat: { body: 'verda' }, landing: { body: LBODY }, touchdown: { body: LBODY }, flameout: { body: 'lune' },
+}[MODE] || { body: 'verda' };
+const BODY = BODIES[cfg.body];
+const R = BODY.radius;
+const GROUND_ALT = cfg.water ? 0 : (cfg.body === 'verda' ? LAUNCH_SITE.altitude : 0);
+const OMEGA = 2 * Math.PI / BODY.rotationPeriod;
+const theta = (ut) => BODY.initialRotation + OMEGA * ut;
+const qTheta = new THREE.Quaternion();
+const Y = new THREE.Vector3(0, 1, 0);
+const d0 = latLonToDir(LAUNCH_SITE.lat, LAUNCH_SITE.lon);
+const UPf = new THREE.Vector3(d0.x, d0.y, d0.z).normalize();                           // fixed-frame up at the site
+const lo = LAUNCH_SITE.lon * Math.PI / 180, la = LAUNCH_SITE.lat * Math.PI / 180;
+const EASTf = new THREE.Vector3(-Math.sin(lo), 0, -Math.cos(lo)).normalize();
+const NORTHf = new THREE.Vector3(-Math.sin(la) * Math.cos(lo), Math.cos(la), Math.sin(la) * Math.sin(lo)).normalize();
+const SOUTHf = NORTHf.clone().negate();
+const SUNf = new THREE.Vector3().addScaledVector(UPf, MODE === 'reentry' ? 0.35 : 0.5).addScaledVector(EASTf, 0.8).addScaledVector(SOUTHf, params.get('sun') === 'front' ? 0.6 : -0.3).normalize();
+const siteFixed = UPf.clone().multiplyScalar(R + GROUND_ALT);                          // ground point below the site
+const qFixedVessel = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(EASTf, UPf, SOUTHf));
+
+// mock universe / terrain for Effects (single body at the root origin)
+const mockUniverse = {
+  bodyPosition: (id, ut, out = new THREE.Vector3()) => out.set(0, 0, 0),
+  bodyVelocity: (id, ut, out = new THREE.Vector3()) => out.set(0, 0, 0),
+  sunDirection: (id, rel, ut, out = new THREE.Vector3()) => out.copy(SUNf).applyQuaternion(qTheta),
+  isInShadow: () => false,
+};
+// linear albedo like terrain.js terrainSample() returns (sampled from the real bodies)
+const GROUND_COLORS = { verda: [0.029, 0.147, 0.026], rusta: [0.62, 0.23, 0.11], lune: [0.26, 0.26, 0.28], pip: [0.45, 0.78, 0.64] };
+const GROUND_COLOR = cfg.biome === 'Launch Site' ? [0.42, 0.45, 0.36] : GROUND_COLORS[cfg.body] || [0.42, 0.45, 0.36];
+const mockTerrain = {
+  surfaceHeight: () => GROUND_ALT,
+  terrainSample: () => ({ height: GROUND_ALT, color: GROUND_COLOR, biome: cfg.biome || 'Test', water: !!cfg.water }),
+  isWater: () => !!cfg.water,
+};
+
+// ───────── mock vessel ─────────
+class MockVessel {
+  constructor(parts, comY) {
+    this.id = 'mock-' + Math.random().toString(36).slice(2, 7);
+    this.name = 'Mock'; this.type = 'ship'; this.bodyId = cfg.body; this.parts = parts; this.root = parts[0];
+    this.pos = new THREE.Vector3(); this.vel = new THREE.Vector3(); this.rot = new THREE.Quaternion();
+    this.angVel = new THREE.Vector3(); this.comLocal = new THREE.Vector3(0, comY, 0);
+    this.mass = 18000; this.reentryIntensity = 0; this.destroyed = false; this.situation = 'PRELAUNCH';
+    this.telemetry = { mach: 0, altitude: 0, radarAltitude: 0, surfaceSpeed: 0, reentryIntensity: 0 };
+    this.fixedPos = new THREE.Vector3(); this.fixedVel = new THREE.Vector3(); this.fixedRot = qFixedVessel.clone();
+  }
+  partWorldPos(part, out = new THREE.Vector3()) { return out.copy(part.pos).sub(this.comLocal).applyQuaternion(this.rot).add(this.pos); }
+  /** Update inertial state from body-fixed state (rotating with the planet). */
+  syncFromFixed() {
+    this.pos.copy(this.fixedPos).applyQuaternion(qTheta);
+    this.vel.copy(this.fixedVel).applyQuaternion(qTheta);
+    this.vel.x += OMEGA * this.pos.z; this.vel.z += -OMEGA * this.pos.x;
+    this.rot.copy(qTheta).multiply(this.fixedRot);
+    const alt = this.pos.length() - R;
+    this.telemetry.altitude = alt; this.telemetry.radarAltitude = alt - GROUND_ALT;
+  }
+}
+let uidCounter = 1;
+function mkPart(id, x, y, z = 0, extra = {}) {
+  const def = PARTS[id];
+  const p = { uid: uidCounter++, id, def, pos: new THREE.Vector3(x, y, z), rot: new THREE.Quaternion(), resources: {}, temp: 290, destroyed: false, stage: 0, ...extra };
+  for (const [k, v] of Object.entries(def.resources || {})) p.resources[k] = { amount: v, max: v };
+  if (def.modules.engine) p.engine = { active: false, throttleEff: 0, thrust: 0, flameout: false, gimbal: new THREE.Vector2() };
+  return p;
+}
+
+// ───────── mock rocket meshes ─────────
+const M = {
+  white: new THREE.MeshStandardMaterial({ color: 0xf1f2f4, roughness: 0.45, metalness: 0.1 }),
+  orange: new THREE.MeshStandardMaterial({ color: 0xe8741f, roughness: 0.5, metalness: 0.1 }),
+  dark: new THREE.MeshStandardMaterial({ color: 0x2b2f36, roughness: 0.5, metalness: 0.6 }),
+  metal: new THREE.MeshStandardMaterial({ color: 0x8a8f98, roughness: 0.35, metalness: 0.85 }),
+  pod: new THREE.MeshStandardMaterial({ color: 0xd9dde3, roughness: 0.4, metalness: 0.3 }),
+  shield: new THREE.MeshStandardMaterial({ color: 0x5a3b28, roughness: 0.9, metalness: 0.0 }),
+};
+function partMesh(p) {
+  const d = p.def, g = new THREE.Group(), r = d.radius, h = d.height;
+  const add = (geo, mat, y = 0) => { const m = new THREE.Mesh(geo, mat); m.position.y = y; m.castShadow = m.receiveShadow = true; g.add(m); return m; };
+  const style = d.mesh?.style || d.category;
+  if (d.id.startsWith('pod') || d.id === 'lander_can') {
+    add(new THREE.CylinderGeometry(d.topRadius ?? r * 0.6, r, h, 32), M.pod);
+    add(new THREE.CylinderGeometry((d.topRadius ?? r * 0.6) * 0.7, (d.topRadius ?? r * 0.6), 0.12, 24), M.dark, h / 2 + 0.06);
+  } else if (d.id.startsWith('heatshield')) {
+    add(new THREE.CylinderGeometry(r, r * 0.92, h, 32), M.shield);
+  } else if (style === 'srb') {
+    add(new THREE.CylinderGeometry(r, r, h, 28), M.white);
+    add(new THREE.CylinderGeometry(r * 1.01, r * 1.01, h * 0.18, 28), M.orange, h * 0.28);
+    add(new THREE.CylinderGeometry(r * 1.01, r * 1.01, h * 0.08, 28), M.dark, -h * 0.3);
+    add(new THREE.ConeGeometry(r, r * 2.2, 28), M.orange, h / 2 + r * 1.1);
+    add(new THREE.CylinderGeometry(r * 0.45, r * 0.62, 0.45, 20, 1, true), M.dark, -h / 2 - 0.1);
+  } else if (d.category === 'engine') {
+    add(new THREE.CylinderGeometry(r * 0.9, r * 0.6, h * 0.4, 24), M.metal, h * 0.3);
+    const bell = add(new THREE.CylinderGeometry(r * 0.35, d.modules.engine.nozzle.radius, h * 0.6, 28, 1, true), M.dark, -h * 0.2);
+    bell.material = M.dark.clone(); bell.material.side = THREE.DoubleSide;
+  } else if (d.category === 'fuel') {
+    add(new THREE.CylinderGeometry(r, r, h, 32), M.white);
+    add(new THREE.CylinderGeometry(r * 1.005, r * 1.005, Math.min(0.35, h * 0.1), 32), M.dark, h * 0.35);
+    add(new THREE.CylinderGeometry(r * 1.005, r * 1.005, Math.min(0.35, h * 0.1), 32), M.orange, -h * 0.35);
+  } else if (d.category === 'coupling') {
+    add(new THREE.CylinderGeometry(r, r, h, 28), M.dark);
+  } else if (d.id === 'nose_cone') {
+    add(new THREE.ConeGeometry(r, h, 28), M.white);
+  } else {
+    add(new THREE.BoxGeometry(r * 2, h, r * 2), M.metal);
+  }
+  return g;
+}
+
+// simple additive plume for the mock engines (the real one is src/render/plume.js by parts3d)
+const PLUME_VERT = `#include <common>
+#include <logdepthbuf_pars_vertex>
+varying float vT; varying vec3 vN; varying vec3 vV;
+void main(){ vT = clamp(-position.y, 0.0, 1.0); vec4 mv = modelViewMatrix * vec4(position,1.0);
+vN = normalize(normalMatrix*normal); vV = -mv.xyz; gl_Position = projectionMatrix*mv;
+#include <logdepthbuf_vertex>
+}`;
+const PLUME_FRAG = `#include <common>
+#include <logdepthbuf_pars_fragment>
+uniform vec3 uColor; uniform vec3 uCore; uniform float uI; uniform float uTime; varying float vT; varying vec3 vN; varying vec3 vV;
+void main(){
+#include <logdepthbuf_fragment>
+float facing = abs(dot(normalize(vN), normalize(vV)));
+float core = pow(facing, 3.0) * pow(1.0 - vT, 2.2);
+float body = pow(facing, 1.2) * pow(1.0 - vT, 1.3);
+float flick = 0.9 + 0.1*sin(uTime*60.0 + vT*20.0);
+vec3 c = (uCore * core * 3.5 + uColor * body * 1.6) * uI * flick;
+gl_FragColor = vec4(c, 1.0);
+#include <tonemapping_fragment>
+#include <colorspace_fragment>
+}`;
+function plumeMesh(part) {
+  const e = part.def.modules.engine, L = e.plume.length, nr = e.nozzle.radius;
+  const geo = new THREE.CylinderGeometry(nr * 0.95, nr * 2.1, 1, 28, 12, true);
+  geo.translate(0, -0.5, 0);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) { const t = -pos.getY(i); const s = 1 + Math.sin(t * Math.PI) * 0.35 - t * 0.2; pos.setX(i, pos.getX(i) * s); pos.setZ(i, pos.getZ(i) * s); }
+  geo.computeVertexNormals();
+  const mat = new THREE.ShaderMaterial({ vertexShader: PLUME_VERT, fragmentShader: PLUME_FRAG, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending, uniforms: { uColor: { value: new THREE.Color(e.plume.color) }, uCore: { value: new THREE.Color(e.plume.core) }, uI: { value: 0 }, uTime: { value: 0 } } });
+  const m = new THREE.Mesh(geo, mat);
+  m.position.y = e.nozzle.y;
+  m.scale.set(1, L, 1);
+  m.renderOrder = 13;
+  m.userData.L = L;
+  return m;
+}
+
+function buildRocket(parts) {
+  const group = new THREE.Group();
+  for (const p of parts) {
+    const m = partMesh(p); m.position.copy(p.pos); m.quaternion.copy(p.rot); group.add(m); p.mesh = m;
+    if (p.engine) { const pl = plumeMesh(p); m.add(pl); p.plume = pl; }
+  }
+  scene.add(group);
+  return group;
+}
+
+// Standard test rocket: swivel core + 2 hammer SRBs + tanks + pod. Root (engine) at local origin.
+function standardRocket() {
+  const parts = [
+    mkPart('eng_swivel', 0, 0.8),
+    mkPart('tank_t800', 0, 3.475),
+    mkPart('tank_t800', 0, 7.225),
+    mkPart('decoupler_s1', 0, 9.2),
+    mkPart('pod_mk1', 0, 9.85),
+    mkPart('srb_hammer', 1.25, 2.5),
+    mkPart('srb_hammer', -1.25, 2.5),
+  ];
+  return parts;
+}
+
+// Lander: Terrier + T400 + lander can + 4 deployed legs (feet ~0.25 m below the engine).
+function lander() {
+  const parts = [mkPart('eng_terrier', 0, 0.45), mkPart('tank_t400', 0, 1.85), mkPart('lander_can', 0, 3.325)];
+  for (let k = 0; k < 4; k++) {
+    const leg = mkPart('legs_lt1', 0.65 * Math.cos(k * Math.PI / 2), 1.2, 0.65 * Math.sin(k * Math.PI / 2));
+    leg.rot.setFromAxisAngle(Y, -k * Math.PI / 2);
+    leg.legs = { deployed: true, t: 1, compression: 0 };
+    parts.push(leg);
+  }
+  return parts;
+}
+
+// ───────── environment: sky dome, ground, pad, lights ─────────
+const SKY_VERT = `#include <common>
+#include <logdepthbuf_pars_vertex>
+varying vec3 vDir; void main(){ vDir = normalize((modelMatrix*vec4(position,0.0)).xyz); vec4 mv = modelViewMatrix*vec4(position,1.0); gl_Position = projectionMatrix*mv;
+#include <logdepthbuf_vertex>
+}`;
+const SKY_FRAG = `#include <common>
+#include <logdepthbuf_pars_fragment>
+uniform vec3 uUp; uniform vec3 uSun; uniform vec3 uZenith; uniform vec3 uHorizon; uniform vec3 uGround; varying vec3 vDir;
+void main(){
+#include <logdepthbuf_fragment>
+vec3 d = normalize(vDir); float h = dot(d, uUp);
+vec3 c = mix(uHorizon, uZenith, pow(clamp(h,0.0,1.0), 0.45));
+c = mix(c, uGround, smoothstep(0.0, -0.08, h));
+float s = max(dot(d, uSun), 0.0);
+c += vec3(1.0,0.85,0.6) * (pow(s, 600.0)*12.0 + pow(s, 12.0)*0.25);
+gl_FragColor = vec4(c,1.0);
+#include <tonemapping_fragment>
+#include <colorspace_fragment>
+}`;
+const skyU = { uUp: { value: new THREE.Vector3() }, uSun: { value: new THREE.Vector3() }, uZenith: { value: new THREE.Color() }, uHorizon: { value: new THREE.Color() }, uGround: { value: new THREE.Color() } };
+const sky = new THREE.Mesh(new THREE.SphereGeometry(1e5, 32, 16), new THREE.ShaderMaterial({ vertexShader: SKY_VERT, fragmentShader: SKY_FRAG, uniforms: skyU, side: THREE.BackSide, depthWrite: false }));
+sky.renderOrder = -100;
+scene.add(sky);
+const AIRLESS = !BODY.atmosphere;
+if (AIRLESS) { skyU.uZenith.value.setRGB(0.0, 0.0, 0.004); skyU.uHorizon.value.setRGB(0.01, 0.01, 0.02); skyU.uGround.value.setRGB(0.02, 0.02, 0.02); }
+else if (cfg.body === 'rusta') { skyU.uZenith.value.setRGB(0.12, 0.08, 0.06); skyU.uHorizon.value.setRGB(0.55, 0.42, 0.34); skyU.uGround.value.setRGB(0.3, 0.12, 0.06); }
+else if (MODE === 'reentry' || MODE === 'heat') { skyU.uZenith.value.setRGB(0.004, 0.012, 0.05); skyU.uHorizon.value.setRGB(0.12, 0.25, 0.55); skyU.uGround.value.setRGB(0.05, 0.08, 0.12); }
+else { skyU.uZenith.value.setRGB(0.07, 0.2, 0.6); skyU.uHorizon.value.setRGB(0.55, 0.72, 0.95); skyU.uGround.value.setRGB(0.3, 0.35, 0.3); }
+
+// body-fixed group (sits at the body centre, rotates with the planet)
+const bodyGroup = new THREE.Group();
+scene.add(bodyGroup);
+const siteGroup = new THREE.Group();      // local site frame: +Y up, +X east, +Z south
+siteGroup.position.copy(siteFixed);
+siteGroup.quaternion.copy(qFixedVessel);
+bodyGroup.add(siteGroup);
+
+function groundTexture(kind) {
+  const c = document.createElement('canvas'); c.width = c.height = 512;
+  const g = c.getContext('2d');
+  const base = kind === 'lune' ? [128, 128, 132] : kind === 'water' ? [22, 70, 120] : kind === 'rusta' ? [196, 104, 62] : kind === 'pip' ? [150, 214, 190] : kind === 'forest' ? [40, 92, 36] : [88, 118, 62];
+  const img = g.createImageData(512, 512);
+  for (let i = 0; i < 512 * 512; i++) {
+    const n = (Math.random() - 0.5) * (kind === 'water' ? 10 : 34);
+    const x = i % 512, y = (i / 512) | 0;
+    const blotch = Math.sin(x * 0.031) * Math.sin(y * 0.027) * 10 + Math.sin(x * 0.11 + y * 0.07) * 5;
+    img.data[i * 4] = base[0] + n + blotch; img.data[i * 4 + 1] = base[1] + n + blotch; img.data[i * 4 + 2] = base[2] + n * 0.7 + blotch * 0.5; img.data[i * 4 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(60, 60); t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
+}
+const groundKind = cfg.water ? 'water' : cfg.body === 'lune' ? 'lune' : cfg.body === 'rusta' ? 'rusta' : cfg.body === 'pip' ? 'pip' : (MODE === 'landing' || MODE === 'touchdown') ? 'forest' : 'grass';
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(12000, 12000), new THREE.MeshStandardMaterial({
+  map: groundTexture(groundKind), roughness: cfg.water ? 0.08 : 0.95, metalness: cfg.water ? 0.2 : 0,
+}));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+siteGroup.add(ground);
+if (!cfg.water && cfg.body === 'verda' && MODE !== 'landing' && MODE !== 'touchdown') {
+  const pad = new THREE.Mesh(new THREE.CylinderGeometry(28, 30, 1.2, 48), new THREE.MeshStandardMaterial({ color: 0x9c9c98, roughness: 0.85 }));
+  pad.position.y = 0.6 - 1.2 + 0.12; pad.receiveShadow = true; pad.castShadow = true;
+  siteGroup.add(pad);
+  const trench = new THREE.Mesh(new THREE.BoxGeometry(6, 0.1, 44), new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 1 }));
+  trench.position.set(0, 0.03, 0); siteGroup.add(trench);
+  // launch tower
+  const tower = new THREE.Group();
+  const steel = new THREE.MeshStandardMaterial({ color: 0xb8412c, roughness: 0.6, metalness: 0.4 });
+  for (let i = 0; i < 4; i++) { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.35, 22, 0.35), steel); leg.position.set((i % 2) * 2.6 - 1.3, 11, (i >> 1) * 2.6 - 1.3); leg.castShadow = true; tower.add(leg); }
+  for (let k = 0; k < 8; k++) { const b = new THREE.Mesh(new THREE.BoxGeometry(2.9, 0.22, 2.9), steel); b.position.y = 2.5 + k * 2.6; b.castShadow = true; tower.add(b); }
+  tower.position.set(-7, 0, -2); siteGroup.add(tower);
+  // distant hills for depth
+  const hillMat = new THREE.MeshStandardMaterial({ color: 0x5d7a4a, roughness: 1 });
+  for (let i = 0; i < 9; i++) {
+    const hill = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 12), hillMat);
+    const a = i / 9 * Math.PI * 2 + 0.3, d = 2600 + (i % 3) * 700;
+    hill.scale.set(900 + (i * 211) % 500, 140 + (i * 73) % 160, 700 + (i * 157) % 400);
+    hill.position.set(Math.cos(a) * d, -40, Math.sin(a) * d);
+    siteGroup.add(hill);
+  }
+}
+if (cfg.water) {
+  // a buoy for scale
+  const b = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.8, 1.6, 16), M.orange); b.position.set(14, 0.3, 6); siteGroup.add(b);
+}
+
+const hemi = new THREE.HemisphereLight(cfg.body === 'rusta' ? 0xd8b8a0 : 0xbcd6ff, 0x4a4a3a, AIRLESS ? 0.08 : 0.9);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(cfg.body === 'rusta' ? 0xffe2c8 : 0xfff2e0, AIRLESS ? 3.5 : 3.0);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = sun.shadow.camera.bottom = -40; sun.shadow.camera.right = sun.shadow.camera.top = 40;
+sun.shadow.camera.near = 1; sun.shadow.camera.far = 400;
+sun.shadow.bias = -0.0005;
+scene.add(sun, sun.target);
+
+// ───────── effects ─────────
+const fx = REAL ? new Effects(scene, { quality: QUALITY }) : new Effects(scene, { quality: QUALITY, universe: mockUniverse, terrain: mockTerrain });
+
+// ───────── scenario ─────────
+const origin = new THREE.Vector3();     // floating origin (root frame = body frame here)
+let ut = 0, simT = 0;
+const vessels = [];
+const flight = { vessels, active: null, warp: { index: 0, rate: 1, mode: 'physics' } };
+const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+const camFixed = new THREE.Vector3(), lookFixed = new THREE.Vector3();
+let scenario;
+
+function setEngines(v, on, thr = 1, filter = null) {
+  for (const p of v.parts) if (p.engine && (!filter || filter(p))) {
+    p.engine.active = on; p.engine.throttleEff = on ? thr : 0;
+    p.engine.thrust = on ? p.def.modules.engine.thrustVac * 1000 * thr * 0.88 : 0;
+  }
+}
+function syncMeshes(v) {
+  if (!v.group) return;
+  v.group.position.copy(v.pos).sub(origin).sub(tmp.copy(v.comLocal).applyQuaternion(v.rot));
+  v.group.quaternion.copy(v.rot);
+  for (const p of v.parts) if (p.plume) {
+    const on = p.engine.active && p.engine.throttleEff > 0.02;
+    p.plume.visible = on;
+    const pr = Math.max(0.02, (v.pos.length() - R < 80000 ? 1 : 1));
+    p.plume.material.uniforms.uI.value = on ? p.engine.throttleEff * pr : 0;
+    p.plume.material.uniforms.uTime.value = simT;
+    p.plume.scale.y = p.plume.userData.L * (0.6 + 0.4 * p.engine.throttleEff);
+  }
+}
+/** Place a vessel at body-fixed site coordinates (east, up, south) with a fixed-frame velocity. */
+function placeFixed(v, e, u, s, ve = 0, vu = 0, vs = 0) {
+  v.fixedPos.copy(siteFixed).addScaledVector(EASTf, e).addScaledVector(UPf, u).addScaledVector(SOUTHf, s);
+  v.fixedVel.set(0, 0, 0).addScaledVector(EASTf, ve).addScaledVector(UPf, vu).addScaledVector(SOUTHf, vs);
+}
+function siteDir(e, u, s, out) { return out.set(0, 0, 0).addScaledVector(EASTf, e).addScaledVector(UPf, u).addScaledVector(SOUTHf, s).normalize(); }
+
+const SCEN = {
+  liftoff: {
+    title: 'Liftoff — ground clouds, steam, flame glow, smoke trail',
+    setup() {
+      const v = new MockVessel(standardRocket(), 4);
+      v.group = buildRocket(v.parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      placeFixed(v, 0, 4.5, 0);
+    },
+    update(t, dt) {
+      const v = this.v;
+      const on = t > 0.3;
+      setEngines(v, on, Math.min(1, (t - 0.3) * 2.5));
+      const tl = Math.max(0, t - 2.2), a = 2.4;
+      const h = 0.5 * a * tl * tl;
+      placeFixed(v, 0, 4.5 + h, 0, 0, a * tl, 0);
+      v.situation = h > 0 ? 'FLYING' : 'PRELAUNCH';
+    },
+    camera(t) {
+      const h = this.v.fixedPos.distanceTo(siteFixed) - 4.5;
+      camFixed.copy(siteFixed).addScaledVector(SOUTHf, 125).addScaledVector(EASTf, 55).addScaledVector(UPf, 14);
+      lookFixed.copy(siteFixed).addScaledVector(UPf, 16 + h * 0.55).addScaledVector(SOUTHf, 8);
+    },
+  },
+  ascent: {
+    title: 'Ascent at 1.5 km — SRB smoke trail lit by the sun',
+    setup() {
+      const v = new MockVessel(standardRocket(), 4);
+      v.group = buildRocket(v.parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      this.dir = siteDir(0.45, 1, 0.08, new THREE.Vector3());
+      v.fixedRot.setFromUnitVectors(Y, tmp.copy(this.dir).applyQuaternion(qFixedVessel.clone().invert())).premultiply(qFixedVessel);
+      setEngines(v, true, 1);
+    },
+    update(t) {
+      const v = this.v, s = 120 + 25 * t, dist = 900 + 120 * t + 12.5 * t * t;
+      v.fixedPos.copy(siteFixed).addScaledVector(this.dir, dist);
+      v.fixedVel.copy(this.dir).multiplyScalar(s);
+      v.telemetry.mach = s / 330;
+    },
+    camera(t) {
+      const v = this.v;
+      camFixed.copy(v.fixedPos).addScaledVector(SOUTHf, 95).addScaledVector(this.dir, -55).addScaledVector(EASTf, -10);
+      lookFixed.copy(v.fixedPos).addScaledVector(this.dir, -38);
+    },
+  },
+  explosion: {
+    title: 'Explosion chain — flash, fireballs, soot, debris shards, sparks',
+    setup() {
+      const v = new MockVessel(standardRocket(), 4);
+      v.group = buildRocket(v.parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      placeFixed(v, 0, 4.5 + 22, 0, 0, 0, 0);
+      this.all = v.parts.slice();
+      this.order = [5, 6, 0, 1, 2, 3, 4];
+      this.times = [0.4, 0.55, 0.7, 0.95, 1.2, 1.45, 1.6];
+      this.k = 0;
+    },
+    update(t) {
+      const v = this.v;
+      placeFixed(v, 0, 4.5 + 22, 0);
+      while (this.k < this.order.length && t >= this.times[this.k]) {
+        const p = this.all[this.order[this.k]];
+        this.k++;
+        if (!p || p.destroyed) continue;
+        const rootPos = v.partWorldPos(p, new THREE.Vector3()).add(bodyRoot);
+        const vel = v.vel.clone().add(new THREE.Vector3((Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4));
+        p.destroyed = true;
+        bus.emit('part:destroyed', { vessel: v, part: p, reason: 'impact', rootPos, bodyId: v.bodyId, vel, size: Math.max(p.def.height, p.def.radius * 2) });
+        if (p.mesh) p.mesh.visible = false;
+      }
+      v.parts = v.parts.filter((p) => !p.destroyed);
+      if (!v.parts.length) { v.destroyed = true; }
+    },
+    camera() {
+      camFixed.copy(siteFixed).addScaledVector(SOUTHf, 95).addScaledVector(EASTf, 30).addScaledVector(UPf, 12);
+      lookFixed.copy(siteFixed).addScaledVector(UPf, 24);
+    },
+  },
+  reentry: {
+    title: 'Reentry at 32 km, 2.3 km/s — plasma sheath + ember streaks',
+    setup() {
+      const parts = [mkPart('pod_mk1', 0, 0.3), mkPart('heatshield_s1', 0, -0.37)];
+      const v = new MockVessel(parts, 0.1);
+      v.group = buildRocket(parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      this.dir = siteDir(1, -0.22, 0.1, new THREE.Vector3());           // direction of motion (east, descending)
+      // heat shield forward: vessel +Y points against the motion
+      const localDir = tmp.copy(this.dir).negate().applyQuaternion(qFixedVessel.clone().invert());
+      v.fixedRot.copy(qFixedVessel).multiply(new THREE.Quaternion().setFromUnitVectors(Y, localDir));
+      this.p0 = siteFixed.clone().addScaledVector(UPf, 32000).addScaledVector(EASTf, -2000);
+    },
+    update(t) {
+      // ?after=1: the plasma fades from t = 2 s while the capsule slows to 150 m/s → afterglow (smoke + embers)
+      const after = params.get('after') === '1', ta = Math.max(0, t - 2);
+      const v = this.v, s = after ? Math.max(150, 2300 - ta * 1100) : 2300;
+      this.x = (this.x || 0) + s * (this.lastT !== undefined ? t - this.lastT : 0); this.lastT = t;
+      v.fixedPos.copy(this.p0).addScaledVector(this.dir, this.x);
+      v.fixedVel.copy(this.dir).multiplyScalar(s);
+      v.reentryIntensity = after ? Math.max(0, Math.min(0.92, 0.2 + t * 0.35) - ta * 0.5) : Math.min(0.92, 0.2 + t * 0.35);
+      v.telemetry.mach = s / 300;
+    },
+    camera(t) {
+      const v = this.v, a = 0.6 + t * 0.05;
+      camFixed.copy(v.fixedPos).addScaledVector(this.dir, -6).addScaledVector(SOUTHf, 12 * Math.cos(a)).addScaledVector(UPf, 5 + 6 * Math.sin(a));
+      lookFixed.copy(v.fixedPos).addScaledVector(this.dir, -3);
+    },
+  },
+  vapor: {
+    title: 'Transonic — vapor cone at Mach 1 (4 km)',
+    setup() {
+      const parts = [mkPart('eng_swivel', 0, 0.8), mkPart('tank_t800', 0, 3.475), mkPart('tank_t800', 0, 7.225), mkPart('pod_mk1', 0, 9.65)];
+      const v = new MockVessel(parts, 4);
+      v.group = buildRocket(parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      this.dir = siteDir(0.9, 1, 0, new THREE.Vector3());
+      v.fixedRot.copy(qFixedVessel).multiply(new THREE.Quaternion().setFromUnitVectors(Y, tmp.copy(this.dir).applyQuaternion(qFixedVessel.clone().invert())));
+      setEngines(v, true, 1);
+      this.p0 = siteFixed.clone().addScaledVector(UPf, 4000);
+    },
+    update(t) {
+      const v = this.v, s = 335;
+      v.fixedPos.copy(this.p0).addScaledVector(this.dir, s * t);
+      v.fixedVel.copy(this.dir).multiplyScalar(s);
+      v.telemetry.mach = 1.0 + 0.02 * Math.sin(t * 0.7);
+    },
+    camera(t) {
+      const v = this.v;
+      camFixed.copy(v.fixedPos).addScaledVector(SOUTHf, 26).addScaledVector(this.dir, 5).addScaledVector(UPf, 2);
+      lookFixed.copy(v.fixedPos).addScaledVector(this.dir, 1);
+    },
+  },
+  splash: {
+    title: 'Splashdown — crown spray, mist, droplet glints',
+    setup() {
+      const parts = [mkPart('pod_mk1', 0, 0.3), mkPart('heatshield_s1', 0, -0.37)];
+      const v = new MockVessel(parts, 0.1);
+      v.group = buildRocket(parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      v.mass = 1500;
+    },
+    update(t) {
+      const v = this.v;
+      const vs = 11, h0 = 12;
+      const h = Math.max(-0.4, h0 - vs * t);
+      placeFixed(v, 0, h + 0.6, 0, 0, h > -0.4 ? -vs : 0, 0);
+      v.telemetry.surfaceSpeed = vs;
+      if (h <= -0.4 && !this.splashed) {
+        this.splashed = true; v.situation = 'SPLASHED';
+        bus.emit('situation:change', { vessel: v, from: 'FLYING', to: 'SPLASHED' });
+      }
+    },
+    camera() {
+      camFixed.copy(siteFixed).addScaledVector(SOUTHf, 34).addScaledVector(EASTf, 12).addScaledVector(UPf, 7);
+      lookFixed.copy(siteFixed).addScaledVector(UPf, 4);
+    },
+  },
+  dust: {
+    title: 'Lune landing — vacuum dust sheet (no smoke, no drag)',
+    setup() {
+      const parts = [mkPart('eng_terrier', 0, 0.45), mkPart('tank_t400', 0, 1.85), mkPart('lander_can', 0, 3.325)];
+      const v = new MockVessel(parts, 1.8);
+      v.group = buildRocket(parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      setEngines(v, true, 0.85);
+    },
+    update(t) {
+      const h = 7 + 2 * Math.sin(t * 0.6);
+      placeFixed(this.v, 0, h, 0, 0, 1.2 * Math.cos(t * 0.6), 0);
+    },
+    camera() {
+      camFixed.copy(siteFixed).addScaledVector(SOUTHf, 48).addScaledVector(EASTf, 16).addScaledVector(UPf, 9);
+      lookFixed.copy(siteFixed).addScaledVector(UPf, 5);
+    },
+  },
+  heat: {
+    title: 'Hot ascent at 40 km, Mach 6 (?ri=0.68) — nose cap glow + short rim-lit sleeve, not a force field',
+    setup() {
+      const parts = [mkPart('eng_skipper', 0, 1.2), mkPart('tank_l64', 0, 6.15), mkPart('tank_l32', 0, 11.775), mkPart('adapter_s2s1', 0, 14.1),
+        mkPart('tank_t400', 0, 15.5), mkPart('pod_mk1', 0, 17.0)];
+      const v = new MockVessel(parts, 7);
+      v.group = buildRocket(parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      this.dir = siteDir(0.72, 0.69, 0, new THREE.Vector3());
+      v.fixedRot.copy(qFixedVessel).multiply(new THREE.Quaternion().setFromUnitVectors(Y, tmp.copy(this.dir).applyQuaternion(qFixedVessel.clone().invert())));
+      this.p0 = siteFixed.clone().addScaledVector(UPf, 40000);
+      this.ri = Number(params.get('ri') || 0.68);
+    },
+    update(t) {
+      const v = this.v, s = 1900;
+      v.fixedPos.copy(this.p0).addScaledVector(this.dir, s * t);
+      v.fixedVel.copy(this.dir).multiplyScalar(s);
+      v.reentryIntensity = Math.min(this.ri, 0.2 + t * 0.5);
+      v.telemetry.mach = 6.1;
+    },
+    camera(t) {
+      const v = this.v, side = params.get('view') === 'chase';
+      camFixed.copy(v.fixedPos).addScaledVector(SOUTHf, side ? 22 : 42).addScaledVector(this.dir, side ? -40 : -2).addScaledVector(UPf, side ? 8 : 3);
+      lookFixed.copy(v.fixedPos).addScaledVector(this.dir, side ? 4 : 0);
+    },
+  },
+  landing: {
+    title: `Landing burn hovering over ${LBODY} — terrain-coloured dust (air) / ballistic regolith streaks (vacuum), scorch`,
+    setup() {
+      const parts = lander();
+      const v = new MockVessel(parts, 1.8);
+      v.group = buildRocket(parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      v.situation = 'FLYING';
+      setEngines(v, true, 0.75);
+    },
+    update(t) {
+      const h = 5.5 + 1.5 * Math.sin(t * 0.5);
+      placeFixed(this.v, 0, h, 0, 0, 0.75 * Math.cos(t * 0.5), 0);
+    },
+    camera() {
+      camFixed.copy(siteFixed).addScaledVector(SOUTHf, 40).addScaledVector(EASTf, 14).addScaledVector(UPf, 7);
+      lookFixed.copy(siteFixed).addScaledVector(UPf, 3.5);
+    },
+  },
+  touchdown: {
+    title: `Touchdown on ${LBODY} at 1.5 m/s — dust puff at every foot + footprints`,
+    setup() {
+      const parts = lander();
+      const v = new MockVessel(parts, 1.8);
+      v.group = buildRocket(parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      v.situation = 'FLYING';
+      setEngines(v, true, 0.3);
+      this.landed = false;
+    },
+    update(t) {
+      const v = this.v, rest = 1.8 + 0.25;
+      const h = Math.max(rest, 5 - 1.5 * t);
+      placeFixed(v, 0, h, 0, 0, h > rest ? -1.5 : 0, 0);
+      if (h <= rest && !this.landed) {
+        this.landed = true; setEngines(v, false); v.situation = 'LANDED';
+        bus.emit('situation:change', { vessel: v, from: 'FLYING', to: 'LANDED' });
+      }
+    },
+    camera() {
+      const top = params.get('view') === 'top';
+      camFixed.copy(siteFixed).addScaledVector(SOUTHf, top ? 7 : 12).addScaledVector(EASTf, top ? 3 : 6).addScaledVector(UPf, top ? 14 : 6);
+      lookFixed.copy(siteFixed).addScaledVector(UPf, 1.2);
+    },
+  },
+  flameout: {
+    title: 'Flameout in vacuum (60 km above Lune) — brief propellant vent + ice glints, no smoke clouds',
+    setup() {
+      const parts = lander();
+      const v = new MockVessel(parts, 1.8);
+      v.group = buildRocket(parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      v.situation = 'ORBITING';
+      setEngines(v, true, 1);
+      this.done = false;
+      this.p0 = siteFixed.clone().addScaledVector(UPf, 60000);
+      this.dir = siteDir(1, 0, 0, new THREE.Vector3());
+      v.fixedRot.copy(qFixedVessel).multiply(new THREE.Quaternion().setFromUnitVectors(Y, tmp.copy(this.dir).applyQuaternion(qFixedVessel.clone().invert())));
+    },
+    update(t) {
+      const v = this.v;
+      v.fixedPos.copy(this.p0).addScaledVector(this.dir, 30 * t);
+      v.fixedVel.copy(this.dir).multiplyScalar(30);
+      if (!this.done && t > 1.0) {
+        this.done = true;
+        const eng = v.parts.find((p) => p.engine);
+        setEngines(v, false);
+        bus.emit('engine:flameout', { vessel: v, part: eng });
+      }
+    },
+    camera() {
+      const v = this.v;
+      camFixed.copy(v.fixedPos).addScaledVector(SOUTHf, 16).addScaledVector(this.dir, -6).addScaledVector(UPf, 3);
+      lookFixed.copy(v.fixedPos).addScaledVector(this.dir, -2.5);
+    },
+  },
+  decouple: {
+    title: 'Booster separation — pyro puffs + sparks',
+    setup() {
+      const v = new MockVessel(standardRocket(), 4);
+      v.group = buildRocket(v.parts);
+      vessels.push(v); flight.active = v; this.v = v;
+      // add radial decouplers between the core & SRBs
+      const d1 = mkPart('decoupler_radial', 0.72, 2.5), d2 = mkPart('decoupler_radial', -0.72, 2.5);
+      d2.rot.setFromAxisAngle(Y, Math.PI);
+      v.parts.push(d1, d2);
+      this.dec = [d1, d2];
+      this.dir = siteDir(0.25, 1, 0, new THREE.Vector3());
+      v.fixedRot.copy(qFixedVessel).multiply(new THREE.Quaternion().setFromUnitVectors(Y, tmp.copy(this.dir).applyQuaternion(qFixedVessel.clone().invert())));
+      setEngines(v, true, 1);
+      this.p0 = siteFixed.clone().addScaledVector(UPf, 7000);
+      this.sep = false; this.stackSep = false;
+    },
+    update(t) {
+      const v = this.v, s = 380;
+      v.fixedPos.copy(this.p0).addScaledVector(this.dir, s * t);
+      v.fixedVel.copy(this.dir).multiplyScalar(s);
+      if (!this.sep && t > 1.0) {
+        this.sep = true;
+        for (const d of this.dec) bus.emit('decouple', { vessel: v, part: d, newVessels: [] });
+        setEngines(v, false, 0, (p) => p.def.modules.engine.type === 'solid');
+        this.srbs = v.parts.filter((p) => p.id === 'srb_hammer');
+        this.sepT = t;
+      }
+      if (this.srbs) {
+        const dt = t - this.sepT;
+        for (const p of this.srbs) { p.mesh.position.x = p.pos.x + Math.sign(p.pos.x) * (4 * dt + 1.5 * dt * dt); p.mesh.position.y = p.pos.y - 9 * dt * dt; p.mesh.rotation.z = Math.sign(p.pos.x) * -0.3 * dt; }
+      }
+      if (!this.stackSep && t > 2.2) { this.stackSep = true; bus.emit('decouple', { vessel: v, part: v.parts[3], newVessels: [] }); }
+    },
+    camera() {
+      const v = this.v;
+      camFixed.copy(v.fixedPos).addScaledVector(SOUTHf, 38).addScaledVector(this.dir, 4).addScaledVector(EASTf, 4);
+      lookFixed.copy(v.fixedPos).addScaledVector(this.dir, -2);
+    },
+  },
+};
+scenario = SCEN[MODE] || SCEN.liftoff;
+scenario.setup();
+
+// mode links
+const modesEl = document.getElementById('modes');
+for (const k of Object.keys(SCEN)) {
+  const a = document.createElement('a'); a.href = `?mode=${k}`; a.textContent = k; if (k === MODE) a.className = 'on'; modesEl.appendChild(a);
+}
+
+// ───────── loop ─────────
+const up = new THREE.Vector3();
+function step(dt, render) {
+  simT += dt; ut += dt;
+  qTheta.setFromAxisAngle(Y, theta(ut));
+  scenario.update(simT, dt);
+  for (const v of vessels) v.syncFromFixed();
+  const act = flight.active;
+  if (REAL) U.bodyPosition(cfg.body, ut, bodyRoot); else bodyRoot.set(0, 0, 0);
+  origin.copy(act.pos);                         // floating origin (scene frame) = CoM; Effects gets the ROOT-frame origin
+  bodyGroup.position.set(0, 0, 0).sub(origin);
+  bodyGroup.quaternion.copy(qTheta);
+  for (const v of vessels) syncMeshes(v);
+  // camera
+  scenario.camera(simT);
+  camera.position.copy(camFixed).applyQuaternion(qTheta).sub(origin);
+  up.copy(UPf).applyQuaternion(qTheta);
+  camera.up.copy(up);
+  camera.lookAt(tmp2.copy(lookFixed).applyQuaternion(qTheta).sub(origin));
+  camera.updateMatrixWorld();
+  // lights & sky
+  const sunW = REAL ? U.sunDirection(cfg.body, act.pos, ut, tmp) : tmp.copy(SUNf).applyQuaternion(qTheta);
+  sun.position.copy(sunW).multiplyScalar(200); sun.target.position.set(0, 0, 0);
+  skyU.uUp.value.copy(up); skyU.uSun.value.copy(sunW);
+  sky.position.copy(camera.position);
+  hemi.position.copy(up);
+  fx.update(dt, { flight, originRootPos: REAL ? tmp2.copy(origin).add(bodyRoot) : origin, camera, ut });
+  if (render) {
+    const shake = fx.cameraShake();
+    camera.position.add(shake);
+    camera.updateMatrixWorld();
+    if (composer) composer.render(); else renderer.render(scene, camera);
+    camera.position.sub(shake);
+  }
+}
+
+// warm-up without rendering
+for (let t = 0; t < WARM; t += 1 / 30) step(1 / 30, false);
+
+let last = performance.now(), frames = 0, fpsAcc = 0, fps = 0;
+const hud = document.getElementById('hud');
+function frame(now) {
+  const real = Math.max(0, Math.min(0.1, (now - last) / 1000)); last = Math.max(last, now);
+  const dt = FIXED || real || 1 / 60;
+  step(dt, true);
+  frames++; fpsAcc += real;
+  if (fpsAcc > 0.5) { fps = frames / fpsAcc; frames = 0; fpsAcc = 0; }
+  const s = fx.stats;
+  hud.innerHTML = `<b>${MODE}</b> — ${scenario.title}<br>t = ${simT.toFixed(2)} s · smoke ${s.smoke} · glow ${s.glow} · shards ${s.shards} · fx ${s.updateMs.toFixed(2)} ms · ${fps.toFixed(0)} fps · quality ${QUALITY}`;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight, false); composer?.setSize(innerWidth, innerHeight); });
+
+window.__fx = fx;
+window.__flight = flight;
+window.__fxStats = () => ({ mode: MODE, t: simT, ...fx.stats, shake: fx.cameraShake().length(), sheath: fx.sheaths.map(s => s.group.visible), cone: fx.cones.map(c => c.mesh.visible), lights: fx.lights.map(l => +l.intensity.toFixed(1)) });
+window.__testReady = true;
+</script>
+</body>
+</html>

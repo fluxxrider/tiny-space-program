@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shell — menus & dialogs</title>
+  <link rel="stylesheet" href="../src/ui/base.css">
+  <script type="importmap">
+  { "imports": { "three": "../node_modules/three/build/three.module.js", "three/addons/": "../node_modules/three/examples/jsm/" } }
+  </script>
+  <style>
+    body { background: radial-gradient(ellipse at 30% 20%, #27466e, #0b1322 60%), #0b1322; }
+    #bg { position: fixed; inset: 0; background: linear-gradient(180deg, #6fa6e8 0%, #b9d7f2 45%, #4f8f3a 46%, #2f6a2c 100%); opacity: .55; }
+  </style>
+</head>
+<body>
+  <div id="bg"></div>
+  <div id="ui-root"></div>
+  <div id="toast-root"></div>
+  <script type="module">
+    // Standalone check of src/ui/menus.js — open any dialog with ?show=settings|pause|results|resultsBad|resultsTimeline|help|helpVab|confirm|hint|modal
+    import '../src/ui/toast.js';
+    import { game } from '../src/core/state.js';
+    import { bus } from '../src/core/events.js';
+    import * as menus from '../src/ui/menus.js';
+    import * as crew from '../src/game/crew.js';
+    const fakeApp = { renderer: null, reportError: console.error, game, bus };
+    const roster = crew.getRoster().crew;
+    const shows = {
+      settings: () => menus.openSettings(fakeApp),
+      pause: () => menus.openPauseMenu(fakeApp, { onResume() {}, onRevertLaunch() {}, onRevertVAB() {}, onSpaceCenter() {}, onQuicksave() {}, onQuickload() {}, onRecover() {} }),
+      results: () => menus.openFlightResults(fakeApp, {
+        title: 'Mission Complete', subtitle: 'Orbiter I — splashed down safely 212 km from the Space Center', tone: 'good',
+        stats: [['Mission time', '1h 12m'], ['Max altitude', '92.4 km'], ['Max speed', '2,284 m/s'], ['Max g-force', '4.8 g'], ['Bodies visited', 'Verda'], ['Science', '100% vibes']],
+        crew: [{ ...roster[0], status: 'recovered' }, { ...roster[1], status: 'recovered' }, { ...roster[3], status: 'alive' }],
+        buttons: [{ label: 'Revert to launch', kind: 'ghost' }, { label: 'Space Center', kind: 'primary' }],
+      }),
+      resultsBad: () => menus.openFlightResults(fakeApp, {
+        title: 'Rapid Unplanned Disassembly', subtitle: 'Big Bertha met the ground at 212 m/s', tone: 'bad',
+        stats: [['Mission time', '48s'], ['Max altitude', '3.2 km'], ['Parts destroyed', '40 / 40']],
+        crew: [{ ...roster[2], status: 'lost' }, { ...roster[0], status: 'lost' }],
+        buttons: [{ label: 'Revert to launch', kind: 'primary' }, { label: 'Revert to VAB' }, { label: 'Space Center' }],
+      }),
+      resultsTimeline: () => menus.openFlightResults(fakeApp, {
+        title: 'Rapid Unplanned Disassembly', subtitle: 'Flea Hopper is no more. The engineers are taking notes.', tone: 'bad', icon: '💥',
+        stats: [['Mission time', '1m 39s'], ['Max altitude', '9,084 m'], ['Max speed', '527 m/s'], ['Max g-force', '7.6 g'], ['Top Mach', '1.6'], ['Worlds visited', 'Verda'], ['Hottest part', '31 % of limit']],
+        crew: [{ ...roster[0], status: 'lost' }],
+        timeline: [{ t: 0, icon: '🚀', text: 'Ignition and liftoff' }, { t: 21, icon: '🌬', text: 'Max Q · 38.2 kPa' }, { t: 34, icon: '⏏', text: 'Stage 1 activated' },
+          { t: 52, icon: '🥨', text: 'Peak 7.6 g' }, { t: 99, icon: '💥', text: 'Vessel lost' }],
+        badges: [{ id: 'first_launch', icon: '🚀', title: 'Liftoff!' }, { id: 'supersonic', icon: '💥', title: 'Sound Barrier' }, { id: 'rud', icon: '🔥', title: 'Rapid Unplanned Disassembly' }],
+        buttons: [{ label: 'Revert to Launch', kind: 'primary' }, { label: 'Revert to VAB', kind: '' }, { label: 'Space Center', kind: 'ghost' }, { label: 'Keep watching', kind: 'ghost' }],
+      }),
+      help: () => menus.openHelp(),
+      helpVab: () => menus.openHelp({ tab: 'vab' }),
+      confirm: () => menus.confirmDialog('Revert to the VAB? This flight will be lost forever (well, mostly).', { title: 'Revert flight', confirmLabel: 'Revert', danger: true }).then((r) => console.log('confirm →', r)),
+      hint: () => { menus.showTutorialHint('test_hint_' + Date.now(), 'Press Space to activate the next stage. The countdown is optional; the enthusiasm is not.', { title: 'Staging' }); },
+      modal: () => menus.openModal({ title: 'Plain modal', content: 'Hello from openModal!', buttons: [{ label: 'OK', kind: 'primary' }] }),
+    };
+    const which = new URLSearchParams(location.search).get('show') || 'settings';
+    for (const k of which.split(',')) shows[k]?.();
+    bus.emit('toast', { title: 'Milestone · Orbit!', text: 'Achieve a stable orbit around Verda.', kind: 'milestone', duration: 60000 });
+    window.__menus = { ...menus, shows };
+    window.__testReady = true;
+  </script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shell — FlightCamera + KSC test</title>
+  <link rel="stylesheet" href="../src/ui/base.css">
+  <script type="importmap">
+  { "imports": { "three": "../node_modules/three/build/three.module.js", "three/addons/": "../node_modules/three/examples/jsm/" } }
+  </script>
+  <style>#info { position: fixed; left: 12px; top: 12px; z-index: 20; font: 13px var(--tsp-mono); color: #e6eefc; background: rgba(8,14,26,.7); padding: 6px 10px; border-radius: 8px; }</style>
+</head>
+<body>
+  <canvas id="game-canvas" tabindex="0"></canvas>
+  <div id="ui-root"></div>
+  <div id="toast-root"></div>
+  <div id="info">…</div>
+  <script type="module">
+    // Standalone check of src/game/cameraController.js (FlightCamera) with the space-center models + fallback environment:
+    // a dummy 18 m rocket stands on the pad; the camera orbits its CoM (the floating origin), like the flight scene will.
+    // URL: ?mode=auto|free|orbital|chase|locked  &hour=<local solar hour>  &dist=<m>
+    import * as THREE from 'three';
+    import '../src/ui/toast.js';
+    import { buildKSC, buildFallbackEnvironment, kscSunDirection, nightFactor } from '../src/render/kscModels.js';
+    import { FlightCamera } from '../src/game/cameraController.js';
+    import { input } from '../src/game/input.js';
+
+    const q = new URLSearchParams(location.search);
+    const canvas = document.getElementById('game-canvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 1e9);
+
+    // Everything is placed relative to the vessel CoM (floating origin) — the world is shifted by −CoM.
+    const COM = new THREE.Vector3(0, 7.5, 0);
+    const world = new THREE.Group();
+    world.position.copy(COM).negate();
+    scene.add(world);
+    const env = buildFallbackEnvironment({ quality: 'high' });
+    world.add(env.group);
+    scene.fog = env.fog;
+    const ksc = buildKSC({ renderer });
+    world.add(ksc);
+
+    // Dummy rocket (vessel-local: +Y nose), base on the pad at y = 0.
+    const rocket = new THREE.Group();
+    const white = new THREE.MeshStandardMaterial({ color: '#f2f4f7', roughness: 0.45 });
+    const orange = new THREE.MeshStandardMaterial({ color: '#f07a1a', roughness: 0.5 });
+    const dark = new THREE.MeshStandardMaterial({ color: '#2d3139', roughness: 0.4, metalness: 0.6 });
+    const add = (geo, mat, y) => { const m = new THREE.Mesh(geo, mat); m.position.y = y; m.castShadow = m.receiveShadow = true; rocket.add(m); return m; };
+    add(new THREE.CylinderGeometry(0.62, 0.9, 1.4, 24), dark, 0.7);
+    add(new THREE.CylinderGeometry(1.25, 1.25, 11, 32), white, 1.4 + 5.5);
+    add(new THREE.CylinderGeometry(1.26, 1.26, 1.2, 32, 1, true), orange, 9.5);
+    add(new THREE.CylinderGeometry(0.05, 1.25, 4.6, 32), orange, 12.4 + 2.3);
+    for (let k = 0; k < 4; k++) {
+      const f = add(new THREE.BoxGeometry(0.12, 2.4, 1.6), orange, 2.8);
+      const a = k * Math.PI / 2; f.position.x = Math.cos(a) * 1.9; f.position.z = Math.sin(a) * 1.9; f.rotation.y = -a + Math.PI / 2;
+    }
+    world.add(rocket);
+
+    const fc = new FlightCamera(camera, canvas, { distance: Number(q.get('dist')) || 45, input, mode: q.get('mode') || 'auto' });
+    const hour = Number(q.get('hour') ?? 9.5);
+    const sunLocal = new THREE.Vector3();
+    // pick a UT with the requested local hour (sun angle from the east horizon)
+    let ut = 0, best = Infinity;
+    for (let i = 0; i < 720; i++) {
+      const t = i * 30, s = kscSunDirection(t, sunLocal);
+      const d = Math.atan2(s.y, s.x) - ((hour - 6) / 24) * Math.PI * 2;
+      const e = Math.abs(Math.atan2(Math.sin(d), Math.cos(d)));
+      if (e < best) { best = e; ut = t; }
+    }
+    const params = { up: new THREE.Vector3(0, 1, 0), vesselRot: new THREE.Quaternion(), vesselSize: 18, velocityDir: new THREE.Vector3(0, 1, 0),
+      speed: 0, radarAltitude: COM.y, shake: new THREE.Vector3() };
+    const info = document.getElementById('info');
+    let last = performance.now(), frames = 0;
+    window.__fc = fc;
+    window.__setRocketRot = (x, y, z) => { params.vesselRot.setFromEuler(new THREE.Euler(x, y, z)); rocket.quaternion.copy(params.vesselRot); };
+    function frame(now) {
+      const dt = Math.min(0.1, (now - last) / 1000); last = now;
+      ut += dt;
+      kscSunDirection(ut, sunLocal);
+      const night = nightFactor(sunLocal.y);
+      fc.update(dt, params);
+      env.update(camera, sunLocal, night);
+      env.sun.target.position.set(0, 0, 0);
+      ksc.update(dt, { night });
+      renderer.render(scene, camera);
+      input.endFrame();
+      if (++frames === 4) window.__testReady = true;
+      info.textContent = `mode ${fc.mode} · dist ${fc.distance.toFixed(1)} m · yaw ${fc.yaw.toFixed(2)} · pitch ${fc.pitch.toFixed(2)}`;
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+  </script>
+</body>
+</html>

@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Worlds — PlanetSystem test</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hud { position: fixed; left: 10px; top: 8px; color: #d8e6ff; font: 12px/1.45 ui-monospace, Menlo, monospace;
+           text-shadow: 0 1px 2px #000; pointer-events: none; white-space: pre; }
+    #presets { position: fixed; right: 10px; top: 8px; display: flex; gap: 4px; flex-wrap: wrap; max-width: 60vw; justify-content: flex-end; }
+    #presets a { color: #cfe0ff; background: rgba(20, 30, 50, 0.7); border: 1px solid rgba(120, 170, 255, 0.35); border-radius: 6px;
+                 padding: 3px 8px; font: 12px ui-monospace, Menlo, monospace; text-decoration: none; }
+    #presets a.on { background: rgba(63, 169, 255, 0.45); }
+    body.clean #hud, body.clean #presets { display: none; }
+  </style>
+  <script type="importmap">
+  { "imports": { "three": "../node_modules/three/build/three.module.js", "three/addons/": "../node_modules/three/examples/jsm/" } }
+  </script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="presets"></div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { PlanetSystem } from '../src/render/planets.js';
+import { BODIES, LAUNCH_SITE, latLonToDir } from '../src/data/bodies.js';
+import { surfaceHeight, biomeName } from '../src/world/terrain.js';
+
+let U;
+try { U = await import('../src/physics/universe.js'); if (!U.bodyPosition) throw 0; }
+catch { U = await import('../src/world/ephemeris.js'); }
+
+const params = new URLSearchParams(location.search);
+if (params.get('clean') === '1') document.body.classList.add('clean');
+const quality = params.get('q') || 'high';
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.setSize(innerWidth, innerHeight, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.3, 1e13);
+const t0 = performance.now();
+const planets = new PlanetSystem(renderer, { quality });
+scene.add(planets.root);
+console.log(`PlanetSystem constructed in ${(performance.now() - t0).toFixed(0)} ms, workers: ${planets.service.workers.length}`);
+
+// a little test object at the origin (shows sun light, shadows and the env map)
+const probe = new THREE.Group();
+{
+  const m1 = new THREE.MeshStandardMaterial({ color: 0xdfe6ee, metalness: 0.85, roughness: 0.25 });
+  const m2 = new THREE.MeshStandardMaterial({ color: 0xff7a2a, metalness: 0.1, roughness: 0.55 });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 3.2, 32), m1); body.position.y = 1.6;
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(0.6, 1.2, 32), m2); cone.position.y = 3.8;
+  for (const m of [body, cone]) { m.castShadow = true; m.receiveShadow = true; probe.add(m); }
+  scene.add(probe);
+}
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.zoomSpeed = 1.2;
+
+const _q = new THREE.Quaternion();
+function surfaceFrame(bodyId, lat, lon, ut) {
+  const d = latLonToDir(lat, lon);
+  const fixed = new THREE.Vector3(d.x, d.y, d.z);
+  const q = U.rotationQuat(bodyId, ut, _q.clone());
+  const up = fixed.clone().applyQuaternion(q);
+  const north = new THREE.Vector3(0, 1, 0).addScaledVector(up, -up.y).normalize();
+  const east = new THREE.Vector3().crossVectors(north, up);
+  return { fixed, up, north, east, center: U.bodyPosition(bodyId, ut, new THREE.Vector3()) };
+}
+function sunDirAt(bodyId, ut) { return U.bodyPosition('sola', ut, new THREE.Vector3()).sub(U.bodyPosition(bodyId, ut, new THREE.Vector3())).normalize(); }
+function rotY(v, deg) { return v.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), deg * Math.PI / 180); }
+
+// Generic surface view: body, lat/lon (deg), alt above terrain (m), wanted sun elevation (deg, morning if > 0 else evening),
+// look azimuth (deg from north, clockwise) and pitch (deg, negative = down).
+function surfaceView(bodyId, lat, lon, alt, sunElev, az, pitch, extra = {}) {
+  const T = BODIES[bodyId].rotationPeriod;
+  let ut = 0, best = Infinity;
+  for (let i = 0; i < 720; i++) {
+    const t = (i / 720) * T;
+    const f = surfaceFrame(bodyId, lat, lon, t);
+    const s = sunDirAt(bodyId, t);
+    const el = Math.asin(f.up.dot(s)) * 180 / Math.PI;
+    const east = s.dot(f.east) > 0;          // morning: sun in the east
+    const err = Math.abs(el - Math.abs(sunElev)) + ((sunElev >= 0) === east ? 0 : 1000);
+    if (err < best) { best = err; ut = t; }
+  }
+  const f = surfaceFrame(bodyId, lat, lon, ut);
+  const h = surfaceHeight(bodyId, f.fixed.x, f.fixed.y, f.fixed.z);
+  const origin = f.center.clone().addScaledVector(f.up, BODIES[bodyId].radius + h + alt);
+  const a = az * Math.PI / 180, p = pitch * Math.PI / 180;
+  const look = f.north.clone().multiplyScalar(Math.cos(a)).addScaledVector(f.east, Math.sin(a)).multiplyScalar(Math.cos(p)).addScaledVector(f.up, Math.sin(p));
+  return { ut, origin, cam: new THREE.Vector3(), target: look.multiplyScalar(Math.max(50, alt * 0.05)), up: f.up, near: Math.max(0.2, alt * 0.002), ...extra };
+}
+
+// Like surfaceView but with a signed sun elevation (negative = below the horizon) and an explicit side
+// (evening: sun in the west).
+function surfaceViewAt(bodyId, lat, lon, alt, sunEl, evening, az, pitch, extra = {}) {
+  const T = BODIES[bodyId].rotationPeriod;
+  let ut = 0, best = Infinity;
+  for (let i = 0; i < 1440; i++) {
+    const t = (i / 1440) * T;
+    const f = surfaceFrame(bodyId, lat, lon, t);
+    const s = sunDirAt(bodyId, t);
+    const el = Math.asin(f.up.dot(s)) * 180 / Math.PI;
+    const west = s.dot(f.east) < 0;
+    const err = Math.abs(el - sunEl) + (west === evening ? 0 : 1000);
+    if (err < best) { best = err; ut = t; }
+  }
+  const f = surfaceFrame(bodyId, lat, lon, ut);
+  const h = surfaceHeight(bodyId, f.fixed.x, f.fixed.y, f.fixed.z);
+  const origin = f.center.clone().addScaledVector(f.up, BODIES[bodyId].radius + h + alt);
+  const a = az * Math.PI / 180, p = pitch * Math.PI / 180;
+  const look = f.north.clone().multiplyScalar(Math.cos(a)).addScaledVector(f.east, Math.sin(a)).multiplyScalar(Math.cos(p)).addScaledVector(f.up, Math.sin(p));
+  return { ut, origin, cam: new THREE.Vector3(), target: look.multiplyScalar(Math.max(50, alt * 0.05)), up: f.up, near: Math.max(0.2, alt * 0.002), ...extra };
+}
+// Camera `alt` m above the point of `bodyId` that faces `towardId` (or away from it when away = true), looking at `lookId`.
+function facingView(ut, bodyId, towardId, alt, lookId, { away = false, fov = 50, offsetDeg = 0 } = {}) {
+  const c = U.bodyPosition(bodyId, ut, new THREE.Vector3());
+  const d = U.bodyPosition(towardId, ut, new THREE.Vector3()).sub(c).normalize();
+  if (away) d.negate();
+  if (offsetDeg) d.applyAxisAngle(new THREE.Vector3(0, 1, 0), offsetDeg * Math.PI / 180);
+  const origin = c.clone().addScaledVector(d, BODIES[bodyId].radius + alt);
+  const target = U.bodyPosition(lookId, ut, new THREE.Vector3()).sub(origin);
+  const up = Math.abs(d.y) > 0.95 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  return { ut, origin, cam: new THREE.Vector3(), target: target.normalize().multiplyScalar(1000), up, near: 5, fov };
+}
+
+// Each preset: { ut, origin (root frame), cam (scene), target (scene), up, probe? }
+const PRESETS = {
+  pad() {
+    const ut = 0;
+    const f = surfaceFrame('verda', LAUNCH_SITE.lat, LAUNCH_SITE.lon, ut);
+    const h = surfaceHeight('verda', f.fixed.x, f.fixed.y, f.fixed.z);
+    const origin = f.center.clone().addScaledVector(f.up, BODIES.verda.radius + h);
+    return { ut, origin, cam: f.up.clone().multiplyScalar(2).addScaledVector(f.east, -9).addScaledVector(f.north, -3), target: f.east.clone().multiplyScalar(60).addScaledVector(f.up, 5), up: f.up, probe: true, near: 0.2 };
+  },
+  sunset() {
+    const ut = 7740;
+    const f = surfaceFrame('verda', LAUNCH_SITE.lat, LAUNCH_SITE.lon, ut);
+    const h = surfaceHeight('verda', f.fixed.x, f.fixed.y, f.fixed.z);
+    const origin = f.center.clone().addScaledVector(f.up, BODIES.verda.radius + h);
+    return { ut, origin, cam: f.up.clone().multiplyScalar(3).addScaledVector(f.east, 8).addScaledVector(f.north, 4), target: f.east.clone().multiplyScalar(-80).addScaledVector(f.up, 6), up: f.up, probe: true, near: 0.2 };
+  },
+  lowOrbit() {
+    const ut = 0;
+    const c = U.bodyPosition('verda', ut, new THREE.Vector3());
+    const s = sunDirAt('verda', ut);
+    const up = rotY(s, 70).add(new THREE.Vector3(0, 0.25, 0)).normalize();
+    const R = BODIES.verda.radius;
+    const origin = c.clone().addScaledVector(up, R + 100000);
+    const fwd = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0)).normalize().negate();
+    const look = fwd.clone().multiplyScalar(Math.cos(0.5)).addScaledVector(up, -Math.sin(0.5));
+    return { ut, origin, cam: new THREE.Vector3(), target: look.multiplyScalar(1000), up, near: 5 };
+  },
+  space() {
+    const ut = 0;
+    const c = U.bodyPosition('verda', ut, new THREE.Vector3());
+    const l = U.bodyPosition('lune', ut, new THREE.Vector3()).sub(c).normalize();
+    const dir = rotY(l.clone().negate(), 38).add(new THREE.Vector3(0, 0.12, 0)).normalize();
+    const origin = c.clone().addScaledVector(dir, BODIES.verda.radius + 3.0e6);
+    const target = c.clone().sub(origin).addScaledVector(rotY(l, 90), 2.2e5);
+    return { ut, origin, cam: new THREE.Vector3(), target, up: new THREE.Vector3(0, 1, 0), near: 50, fov: 34 };
+  },
+  lune() {
+    const ut = 0;
+    const s = sunDirAt('lune', ut);
+    const q = U.rotationQuat('lune', ut, new THREE.Quaternion());
+    // spot where the sun is ~18° above the horizon
+    const up = rotY(s, 72).add(new THREE.Vector3(0, 0.35, 0)).normalize();
+    const c = U.bodyPosition('lune', ut, new THREE.Vector3());
+    const fixed = up.clone().applyQuaternion(q.clone().invert());
+    const h = surfaceHeight('lune', fixed.x, fixed.y, fixed.z);
+    const origin = c.clone().addScaledVector(up, BODIES.lune.radius + h + 20000);
+    const toSun = s.clone().addScaledVector(up, -s.dot(up)).normalize();
+    const look = toSun.clone().negate().applyAxisAngle(up, 0.9).multiplyScalar(Math.cos(0.55)).addScaledVector(up, -Math.sin(0.55));
+    return { ut, origin, cam: new THREE.Vector3(), target: look.multiplyScalar(1000), up, near: 2 };
+  },
+  rusta() {
+    const ut = 0;
+    const c = U.bodyPosition('rusta', ut, new THREE.Vector3());
+    const s = sunDirAt('rusta', ut);
+    const up = rotY(s, 55).add(new THREE.Vector3(0, 0.3, 0)).normalize();
+    const origin = c.clone().addScaledVector(up, BODIES.rusta.radius + 160000);
+    const fwd = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0)).normalize().negate();
+    const look = fwd.clone().multiplyScalar(Math.cos(0.75)).addScaledVector(up, -Math.sin(0.75));
+    return { ut, origin, cam: new THREE.Vector3(), target: look.multiplyScalar(1000), up, near: 5 };
+  },
+  vesper() {
+    const ut = 0;
+    const c = U.bodyPosition('vesper', ut, new THREE.Vector3());
+    const s = sunDirAt('vesper', ut);
+    const up = rotY(s, 60).add(new THREE.Vector3(0, -0.2, 0)).normalize();
+    const origin = c.clone().addScaledVector(up, BODIES.vesper.radius + 260000);
+    const fwd = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0)).normalize().negate();
+    const look = fwd.clone().multiplyScalar(Math.cos(0.6)).addScaledVector(up, -Math.sin(0.6));
+    return { ut, origin, cam: new THREE.Vector3(), target: look.multiplyScalar(1000), up, near: 5 };
+  },
+  mountains() { return surfaceView('verda', 30.25, 49.0, 4500, 22, 60, -9); },
+  coast() { return surfaceView('verda', LAUNCH_SITE.lat - 0.02, LAUNCH_SITE.lon + 0.02, 900, 35, 70, -14); },
+  cinder() { return surfaceView('cinder', -24, -54, 2500, -6, 30, -18); },
+  nib() { return surfaceView('nib', 12, 40, 6000, 14, 250, -14); },
+  lunesurface() { return surfaceView('lune', 5, 20, 3, 10, 100, -3); },
+  // Verda back-lit by Sola: thin crescent + glowing atmosphere ring, night side faintly visible
+  eclipse() {
+    const ut = 0;
+    const c = U.bodyPosition('verda', ut, new THREE.Vector3());
+    const s = sunDirAt('verda', ut);
+    const dir = rotY(s.clone().negate(), 16).add(new THREE.Vector3(0, 0.1, 0)).normalize();
+    const origin = c.clone().addScaledVector(dir, BODIES.verda.radius + 2.2e6);
+    const target = c.clone().sub(origin);
+    return { ut, origin, cam: new THREE.Vector3(), target, up: new THREE.Vector3(0, 1, 0), near: 50, fov: 45 };
+  },
+  // night side from low orbit with the terminator in view
+  terminator() {
+    const ut = 0;
+    const c = U.bodyPosition('verda', ut, new THREE.Vector3());
+    const s = sunDirAt('verda', ut);
+    const up = rotY(s, 112).add(new THREE.Vector3(0, 0.15, 0)).normalize();
+    const origin = c.clone().addScaledVector(up, BODIES.verda.radius + 250000);
+    const toward = s.clone().addScaledVector(up, -s.dot(up)).normalize();
+    const look = toward.multiplyScalar(Math.cos(0.45)).addScaledVector(up, -Math.sin(0.45));
+    return { ut, origin, cam: new THREE.Vector3(), target: look.multiplyScalar(1000), up, near: 5 };
+  },
+  // deep space, 1e11 m from Sola: every body is a lit dot
+  deep() {
+    const ut = 0;
+    const origin = new THREE.Vector3(0.3e11, 0.35e11, 0.9e11);
+    const target = new THREE.Vector3().sub(origin).normalize().multiplyScalar(1000);
+    return { ut, origin, cam: new THREE.Vector3(), target, up: new THREE.Vector3(0, 1, 0), near: 1000, fov: 50 };
+  },
+  // near Verda looking at Lune (a moon disc lit by Sola, Verda's atmosphere in front)
+  // afternoon: Lune rising in the east through Verda's sky (sun behind the camera, to the west)
+  moonrise() {
+    const ut = 5200;
+    const f = surfaceFrame('verda', LAUNCH_SITE.lat, LAUNCH_SITE.lon, ut);
+    const origin = f.center.clone().addScaledVector(f.up, BODIES.verda.radius + LAUNCH_SITE.altitude + 40);
+    const toL = U.bodyPosition('lune', ut, new THREE.Vector3()).sub(origin).normalize();
+    return { ut, origin, cam: new THREE.Vector3(), target: toL.multiplyScalar(100), up: f.up, near: 0.5, fov: 24 };
+  },
+  // dusk after sunset: Lune high in the east, twilight glow, first stars
+  dusk() { return surfaceView('verda', LAUNCH_SITE.lat, LAUNCH_SITE.lon, 30, -4, 270, 8); },
+  // standing on the beach east of the pad, looking out to sea (shoreline, foam, transparency)
+  beach() { return surfaceView('verda', 0.0460, -74.2046, 4, 35, 95, -6); },
+  rustasurface() { return surfaceView('rusta', 8, 30, 250, 25, 120, -8); },
+  vespersurface() { return surfaceView('vesper', 10, 40, 400, 30, 60, -6); },
+  pipsurface() { return surfaceView('pip', 5, 10, 20, 25, 80, -4); },
+  alt15() { return surfaceView('verda', LAUNCH_SITE.lat + 0.3, LAUNCH_SITE.lon - 0.2, 15000, 40, 95, -25); },
+  // animated: descend from 150 km to 150 m over the launch site coast (LOD streaming test; no prewarm)
+  descent() {
+    const p = surfaceView('verda', LAUNCH_SITE.lat + 0.3, LAUNCH_SITE.lon - 0.2, 150000, 40, 95, -25, { noPrewarm: true });
+    const f = surfaceFrame('verda', LAUNCH_SITE.lat + 0.3, LAUNCH_SITE.lon - 0.2, p.ut);
+    const base = p.origin.clone().addScaledVector(f.up, -150000);
+    p.animate = (t) => {
+      const k = Math.min(1, t / 24);
+      const alt = 150 + (150000 - 150) * Math.pow(1 - k, 3);
+      state.origin.copy(base).addScaledVector(f.up, alt).addScaledVector(f.east, k * 20000);
+    };
+    return p;
+  },
+  // ── regression views for the playtest findings (see notes/worlds.md)
+  // Lune inside Verda's shadow (UT 32340: Sola–Verda–Lune aligned): ground must be dark, not sunlit
+  luneeclipse() {
+    const p = facingView(32340, 'lune', 'verda', 30000, 'lune', { fov: 60 });
+    p.target = U.bodyPosition('lune', p.ut, new THREE.Vector3()).sub(p.origin).normalize().applyAxisAngle(new THREE.Vector3(0, 1, 0), 0.9).multiplyScalar(1000);
+    return p;
+  },
+  // 40 min later: Lune leaving the shadow, penumbra sweeping across the disc (seen from 900 km)
+  lunepenumbra() { return facingView(32340 + 1150, 'lune', 'verda', 900000, 'lune', { fov: 34, offsetDeg: 25 }); },
+  // Lune's shadow on Verda (annular solar eclipse, UT 102900), seen from the day side
+  verdaeclipse() { return facingView(102900, 'verda', 'sola', 2600000, 'verda', { fov: 40, offsetDeg: 12 }); },
+  // Nib's umbra on Rusta (UT 138000)
+  rustaeclipse() { return facingView(138000, 'rusta', 'sola', 1400000, 'rusta', { fov: 40, offsetDeg: 10 }); },
+  // Nib's night side under a full Rusta (planetshine), seen from the Rusta side
+  nibshine() { return facingView(138000, 'nib', 'rusta', 260000, 'nib', { fov: 50, offsetDeg: 8 }); },
+  // Lune's night side lit by Verda (earthshine), full Verda
+  luneshine() { return facingView(102900 - 9000, 'lune', 'verda', 500000, 'lune', { fov: 50, offsetDeg: 10 }); },
+  // Verda seen from Lune's surface, narrow lens (texture/cloud resolution of a distant body)
+  verdafromlune() { return facingView(60000, 'lune', 'verda', 30, 'verda', { fov: 9 }); },
+  // airless night: Lune 12° past the terminator (only tall peaks may still be lit)
+  lunenight() { return facingView(0, 'lune', 'sola', 60000, 'lune', { fov: 60, offsetDeg: 102 }); },
+  // Rusta: ground brightness at sunset vs mid-afternoon (sunset must not be brighter)
+  rustasunset() { return surfaceViewAt('rusta', 8, 30, 4, 1.9, true, 250, -12); },
+  rustaafternoon() { return surfaceViewAt('rusta', 8, 30, 4, 30, true, 250, -12); },
+  // sea at twilight: reflections must follow the sky (sunset glow mirrored, dark sea under a dark sky)
+  verdaseaset() { return surfaceViewAt('verda', -5, -177, 25, -4, true, 270, -2); },
+  vesperseaset() { return surfaceViewAt('vesper', 5, -151.5, 25, 2, true, 270, -2); },
+  vespertwilight() { return surfaceViewAt('vesper', 5, -151.5, 25, -3, true, 270, 3); },
+  // Cinder from high orbit, night side (fissures must not alias into a grid)
+  cindernight() { return facingView(0, 'cinder', 'sola', 350000, 'cinder', { away: true, fov: 60, offsetDeg: 30 }); },
+  cinderday() { return facingView(0, 'cinder', 'sola', 350000, 'cinder', { fov: 60, offsetDeg: 30 }); },
+  // Cinder from 25 km: fissure lines must be organic curves (no stair-steps), fading into the far glow
+  cinderlow() { return surfaceViewAt('cinder', -24, -54, 25000, 20, true, 30, -40); },
+  // standing on Cinder's ash plains in low evening sun: basalt boulders, fissures glowing in the distance
+  cindersurface() { return surfaceViewAt('cinder', -24.3, -54.2, 3, 12, true, 30, -8); },
+  // Lune maria from high orbit (single-vertex ejecta specks)
+  lunehigh() { return facingView(0, 'lune', 'sola', 250000, 'lune', { fov: 60, offsetDeg: 20 }); },
+  // Verda ascent view: 8 km over the coast east of the pad, looking down at the land/sea boundary
+  ascent8() {
+    const p = surfaceViewAt('verda', LAUNCH_SITE.lat - 0.05, LAUNCH_SITE.lon + 0.03, 8000, 35, false, 10, -30);
+    return p;
+  },
+  pip() {
+    const ut = 0;
+    const c = U.bodyPosition('pip', ut, new THREE.Vector3());
+    const s = sunDirAt('pip', ut);
+    const up = rotY(s, 45).add(new THREE.Vector3(0, 0.2, 0)).normalize();
+    const origin = c.clone().addScaledVector(up, BODIES.pip.radius + 25000);
+    const fwd = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0)).normalize().negate();
+    const look = fwd.clone().multiplyScalar(Math.cos(0.8)).addScaledVector(up, -Math.sin(0.8));
+    return { ut, origin, cam: new THREE.Vector3(), target: look.multiplyScalar(1000), up, near: 2 };
+  },
+};
+
+const presetBar = document.getElementById('presets');
+for (const name of Object.keys(PRESETS)) {
+  const a = document.createElement('a'); a.href = '#' + name; a.textContent = name; a.dataset.p = name; presetBar.appendChild(a);
+}
+
+let state = null;
+function applyPreset() {
+  const name = (location.hash || '#pad').slice(1);
+  const fn = PRESETS[name] || PRESETS.pad;
+  const p = fn();
+  state = { name, ut: p.ut, origin: p.origin.clone() };
+  camera.up.copy(p.up);
+  camera.near = p.near || 0.3;
+  camera.fov = p.fov || 60;
+  camera.updateProjectionMatrix();
+  camera.position.copy(p.cam);
+  controls.target.copy(p.target);
+  controls.update();
+  probe.visible = !!p.probe;
+  if (p.probe) {
+    // stand the probe up along local up
+    probe.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), p.up);
+  }
+  for (const a of presetBar.children) a.classList.toggle('on', a.dataset.p === name);
+  state.animate = p.animate || null;
+  state.t0 = performance.now();
+  if (!p.noPrewarm) {
+    const ms = planets.prewarm(camera, state.origin, state.ut, Number(params.get('prewarm') || 20000));
+    console.log(`preset ${name}: prewarm ${ms.toFixed(0)} ms`, JSON.stringify(planets.stats()));
+  }
+}
+addEventListener('hashchange', applyPreset);
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+});
+addEventListener('keydown', (e) => {
+  if (e.key === ']') state.ut += 300;
+  if (e.key === '[') state.ut -= 300;
+  if (e.key === 'h') document.body.classList.toggle('clean');
+});
+
+applyPreset();
+const hud = document.getElementById('hud');
+let frames = 0, fpsT = performance.now(), fps = 0, lastHud = 0;
+let updMs = 0, updMax = 0, updN = 0, updAcc = 0;
+function frame() {
+  controls.update();
+  if (state.animate) state.animate((performance.now() - state.t0) / 1000);
+  const tu = performance.now();
+  planets.update(camera, state.origin, state.ut);
+  const du = performance.now() - tu;
+  updAcc += du; updN++; updMax = Math.max(updMax, du);
+  renderer.render(scene, camera);
+  frames++;
+  const now = performance.now();
+  if (now - fpsT > 1000) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; }
+  if (now - lastHud > 250) {
+    lastHud = now;
+    const st = planets.stats();
+    const info = renderer.info.render;
+    const nb = planets.nearestBody;
+    const rel = state.origin.clone().add(camera.position).sub(U.bodyPosition(nb, state.ut, new THREE.Vector3()));
+    const q = U.rotationQuat(nb, state.ut, new THREE.Quaternion()).invert();
+    const f = rel.clone().applyQuaternion(q).normalize();
+    if (updN) { updMs = updAcc / updN; updAcc = 0; updN = 0; }
+    window.__updStats = { avg: updMs, max: updMax };
+    hud.textContent = `${state.name}  ut ${state.ut.toFixed(0)} s   ${fps.toFixed(1)} fps   ${info.calls} draws   ${(info.triangles / 1000).toFixed(0)}k tris   update ${updMs.toFixed(2)} ms (max ${updMax.toFixed(1)})\n` +
+      `near ${nb}  alt ${(planets.cameraAltitude / 1000).toFixed(3)} km   biome ${biomeName(nb, f.x, f.y, f.z)}\n` +
+      `building ${st.building}  workers ${st.workers}\n` +
+      Object.entries(st.bodies).map(([k, v]) => `${k}: ${v.visible} chunks, lvl ${v.maxLevelShown}, ${v.angPx}px`).join('\n') +
+      `\n[ / ] time ±5 min   h hide HUD`;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+let readyFrames = 0;
+(function waitReady() { if (++readyFrames > 3) window.__testReady = true; else requestAnimationFrame(waitReady); })();
+window.planets = planets;
+</script>
+</body>
+</html>

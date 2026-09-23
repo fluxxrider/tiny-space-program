@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Audio test — Tiny Space Program</title>
+<link rel="stylesheet" href="../src/ui/base.css">
+<style>
+  html, body { overflow: auto; }
+  body { padding: 18px 22px 60px; user-select: text; }
+  h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: 0.06em; }
+  h1 span { color: var(--tsp-accent-2); }
+  .sub { color: var(--tsp-dim); margin-bottom: 14px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  section { padding: 12px 14px; }
+  section h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--tsp-dim); }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; }
+  .btns .tsp-btn { padding: 6px 10px; font-size: 12px; }
+  .tsp-btn.on { background: var(--tsp-accent); color: #07101c; }
+  label.sl { display: grid; grid-template-columns: 120px 1fr 64px; align-items: center; gap: 8px; font-size: 13px; margin: 3px 0; }
+  label.sl output { font-family: var(--tsp-mono); font-size: 12px; color: var(--tsp-accent); text-align: right; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--tsp-mono); font-size: 11.5px; }
+  th, td { padding: 3px 6px; border-bottom: 1px solid var(--tsp-border); text-align: left; white-space: nowrap; }
+  th { color: var(--tsp-dim); font-weight: 600; }
+  td.ok { color: var(--tsp-good); } td.bad { color: var(--tsp-bad); font-weight: 700; }
+  canvas.wave { display: block; background: rgba(0,0,0,0.35); border-radius: 4px; }
+  #summary { font-family: var(--tsp-mono); font-size: 13px; margin: 8px 0 12px; }
+  #summary b.ok { color: var(--tsp-good); } #summary b.bad { color: var(--tsp-bad); }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  #status { font-family: var(--tsp-mono); font-size: 12px; color: var(--tsp-dim); }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js", "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<h1>Tiny <span>Space</span> Program — Audio</h1>
+<div class="sub">Everything here is synthesized live with WebAudio (no audio files). Click “Start audio”, then play with the controls. Offline renders below verify every sound automatically.</div>
+
+<div class="row">
+  <button class="tsp-btn tsp-btn-primary" id="start">▶ Start audio</button>
+  <span id="status">audio not started</span>
+</div>
+
+<div class="grid">
+  <section class="tsp-panel">
+    <h2>Music mood</h2>
+    <div class="btns" id="moods"></div>
+    <h2 style="margin-top:14px">Volumes</h2>
+    <div id="vols"></div>
+  </section>
+  <section class="tsp-panel">
+    <h2>Flight soundscape</h2>
+    <div class="row"><label><input type="checkbox" id="flightOn"> drive audio.updateFlight() every frame</label>
+      <label><input type="checkbox" id="paused"> paused</label>
+      <label>warp <select id="warp"><option>1</option><option>2</option><option>4</option><option>50</option><option>1000</option></select></label></div>
+    <div id="flightSliders"></div>
+  </section>
+</div>
+
+<section class="tsp-panel" style="margin-top:14px">
+  <h2>Sound effects</h2>
+  <div class="btns" id="sfx"></div>
+</section>
+
+<section class="tsp-panel" style="margin-top:14px">
+  <h2>Offline verification (OfflineAudioContext renders)</h2>
+  <div id="summary">rendering…</div>
+  <table id="results"><thead><tr><th>kind</th><th>name</th><th>len s</th><th>peak</th><th>peak dBFS</th><th>RMS dBFS</th><th>centroid≈Hz</th><th>extra</th><th>waveform</th><th>check</th></tr></thead><tbody></tbody></table>
+</section>
+
+<script type="module">
+import { audio, SFX_NAMES } from '../src/audio/audio.js';
+import { SFX, WORLD_SFX } from '../src/audio/sfx.js';
+import { audioLib } from '../src/audio/synth.js';
+import { MusicDirector, MOOD_NAMES } from '../src/audio/music.js';
+import { FlightSoundscape } from '../src/audio/flightSound.js';
+import { el } from '../src/ui/dom.js';
+
+const $ = (id) => document.getElementById(id);
+const status = $('status');
+function refreshStatus() {
+  status.textContent = audio.ctx ? `context ${audio.ctx.state} · ${audio.ctx.sampleRate} Hz · scene ${audio.scene}` : 'audio not started (click Start or anywhere)';
+}
+$('start').addEventListener('click', () => { audio.init(); setTimeout(refreshStatus, 100); });
+setInterval(refreshStatus, 1000);
+
+// ───────── moods ─────────
+const moodBtns = [];
+for (const m of ['spacecenter', 'vab', 'flight', 'map', 'tracking', 'menu', 'silence']) {
+  const b = el('button', { class: 'tsp-btn', text: m, on: { click: () => { audio.init(); audio.setScene(m); moodBtns.forEach(x => x.classList.toggle('on', x === b)); refreshStatus(); } } });
+  moodBtns.push(b); $('moods').appendChild(b);
+}
+// ───────── volumes ─────────
+const vol = { master: 0.8, music: 0.6, sfx: 0.9 };
+for (const k of Object.keys(vol)) {
+  const out = el('output', {}, vol[k].toFixed(2));
+  const inp = el('input', { type: 'range', min: 0, max: 1, step: 0.01, value: vol[k], on: { input: (e) => { vol[k] = +e.target.value; out.textContent = vol[k].toFixed(2); audio.setVolumes(vol); } } });
+  $('vols').appendChild(el('label', { class: 'sl' }, k, inp, out));
+}
+// ───────── flight sliders ─────────
+const fp = { thrustFrac: 0.8, solidFrac: 0.5, dynPressure: 12, mach: 0.8, pressure: 80, reentry: 0, cameraDist: 25 };
+const ranges = { thrustFrac: [0, 1, 0.01], solidFrac: [0, 1, 0.01], dynPressure: [0, 40, 0.5], mach: [0, 8, 0.05], pressure: [0, 101.3, 0.5], reentry: [0, 1, 0.01], cameraDist: [2, 800, 1] };
+for (const k of Object.keys(fp)) {
+  const [a, b, s] = ranges[k];
+  const out = el('output', {}, String(fp[k]));
+  const inp = el('input', { type: 'range', min: a, max: b, step: s, value: fp[k], id: 'sl_' + k, on: { input: (e) => { fp[k] = +e.target.value; out.textContent = fp[k]; } } });
+  $('flightSliders').appendChild(el('label', { class: 'sl' }, k === 'thrustFrac' ? 'thrust' : k, inp, out));
+}
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(0.1, (now - lastT) / 1000); lastT = now;
+  if ($('flightOn').checked) audio.updateFlight(dt, { ...fp, paused: $('paused').checked, warpRate: +$('warp').value });
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+$('paused').addEventListener('change', (e) => audio.pauseAll(e.target.checked));
+
+// ───────── sfx buttons ─────────
+const VARIANTS = [
+  ['click'], ['hover'], ['toggle', { value: true }], ['toggle', { value: false }], ['sas_on'], ['sas_off'], ['error'],
+  ['countdown'], ['countdown', { final: true }], ['milestone'], ['warp', { up: true }], ['warp', { up: false }],
+  ['place'], ['pickup'], ['delete'],
+  ['stage'], ['decouple'], ['explosion', { size: 1, distance: 20 }], ['explosion', { size: 4, distance: 40 }], ['explosion', { size: 8, distance: 600 }],
+  ['chute', { state: 'semi' }], ['chute', { state: 'deployed' }], ['flameout'], ['ignite'], ['launch'], ['gear'], ['splash', { size: 1 }],
+  ['touchdown', { speed: 1 }], ['touchdown', { speed: 4 }], ['sonic_boom'], ['quindar'], ['quindar', { out: true }], ['space'],
+  ['static', { on: true }], ['static', { on: false }],
+];
+const label = (n, o) => n + (o ? ' ' + Object.entries(o).map(([k, v]) => `${k}:${v}`).join(',') : '');
+for (const [n, o] of VARIANTS) {
+  $('sfx').appendChild(el('button', { class: 'tsp-btn', 'data-sfx': 'off', text: label(n, o), on: { click: () => { audio.init(); setTimeout(() => audio.play(n, o), audio.running ? 0 : 150); } } }));
+}
+
+// ───────── offline verification ─────────
+const SR = 44100;
+function analyse(buf) {
+  const chans = []; for (let c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c));
+  const n = buf.length;
+  let peak = 0, nan = false, last = 0;
+  for (let i = 0; i < n; i++) for (const d of chans) { const v = d[i]; if (v !== v) nan = true; const a = Math.abs(v); if (a > peak) peak = a; if (a > 0.0015) last = i; }
+  const active = Math.max(1, last);
+  let e = 0, de = 0;
+  for (const d of chans) for (let i = 1; i < active; i++) { e += d[i] * d[i]; const df = d[i] - d[i - 1]; de += df * df; }
+  const rms = Math.sqrt(e / (active * chans.length));
+  const centroid = rms > 1e-6 ? Math.sqrt(de / Math.max(1e-12, e)) * SR / (2 * Math.PI) : 0;
+  return { peak, rms, nan, activeSec: active / SR, centroid };
+}
+function windows(buf, sec) {
+  const d0 = buf.getChannelData(0), d1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : d0, W = Math.floor(SR * sec), out = [];
+  for (let s = 0; s + W <= buf.length; s += W) { let e = 0; for (let i = s; i < s + W; i++) e += (d0[i] * d0[i] + d1[i] * d1[i]) * 0.5; out.push(Math.sqrt(e / W)); }
+  return out;
+}
+/** Onset density: count rises of a 20 ms energy envelope above its local average (≈ notes/hits per second). */
+function onsetsPerSec(buf) {
+  // one-pole high-pass (~600 Hz) first, so sustained low pads don't mask melodic/percussive attacks
+  const src = buf.getChannelData(0), d = new Float32Array(src.length), k = Math.exp(-2 * Math.PI * 600 / SR);
+  let lp = 0; for (let i = 0; i < src.length; i++) { lp = lp * k + src[i] * (1 - k); d[i] = src[i] - lp; }
+  const H = Math.floor(SR * 0.02), env = [];
+  for (let s = 0; s + H <= buf.length; s += H) { let e = 0; for (let i = s; i < s + H; i++) e += d[i] * d[i]; env.push(Math.sqrt(e / H)); }
+  let count = 0;
+  for (let i = 8; i < env.length; i++) {
+    let avg = 0; for (let k = i - 8; k < i; k++) avg += env[k]; avg /= 8;
+    if (env[i] > avg * 1.5 + 0.0015 && env[i] > env[i - 1] * 1.2) { count++; i += 4; }
+  }
+  return count / (buf.length / SR);
+}
+const dB = (x) => x > 0 ? 20 * Math.log10(x) : -Infinity;
+function drawWave(buf, w = 240, h = 34, color = '#3fa9ff') {
+  const c = el('canvas', { class: 'wave', width: w, height: h }), g = c.getContext('2d'), d = buf.getChannelData(0), step = Math.max(1, Math.floor(d.length / w));
+  g.fillStyle = color;
+  for (let x = 0; x < w; x++) {
+    let mn = 0, mx = 0; for (let i = x * step; i < Math.min(d.length, (x + 1) * step); i++) { if (d[i] < mn) mn = d[i]; if (d[i] > mx) mx = d[i]; }
+    const y0 = (1 - mx) * h / 2, y1 = (1 - mn) * h / 2; g.fillRect(x, y0, 1, Math.max(1, y1 - y0));
+  }
+  return c;
+}
+const tbody = document.querySelector('#results tbody');
+const results = { sfx: [], music: [], flight: [], failures: [] };
+function addRow(kind, name, buf, a, extra, ok, why) {
+  results[kind].push({ name, len: +(buf.length / SR).toFixed(2), peak: +a.peak.toFixed(3), peakDb: +dB(a.peak).toFixed(1), rmsDb: +dB(a.rms).toFixed(1), centroid: Math.round(a.centroid), ...extra, ok, why });
+  if (!ok) results.failures.push(`${kind}:${name} — ${why}`);
+  tbody.appendChild(el('tr', {},
+    el('td', {}, kind), el('td', {}, name), el('td', {}, (buf.length / SR).toFixed(1)), el('td', {}, a.peak.toFixed(3)), el('td', {}, dB(a.peak).toFixed(1)),
+    el('td', {}, dB(a.rms).toFixed(1)), el('td', {}, String(Math.round(a.centroid))), el('td', {}, extra ? Object.entries(extra).map(([k, v]) => `${k}=${v}`).join(' ') : ''),
+    el('td', {}, drawWave(buf, 240, 34, ok ? '#3fa9ff' : '#ff5a4f')), el('td', { class: ok ? 'ok' : 'bad' }, ok ? 'OK' : why)));
+}
+
+const SFX_LEN = { milestone: 3.4, launch: 4.2, explosion: 6.5, splash: 2, chute: 1.6, gear: 1.6, decouple: 1.6, stage: 1.4, flameout: 1.4, ignite: 1.4, warp: 1.2, countdown: 1.2,
+  touchdown: 1.2, sonic_boom: 3.2, quindar: 1, space: 4.6, static: 2.2 };
+async function renderSfx(name, opts) {
+  const len = SFX_LEN[name] ?? 0.8;
+  const ctx = new OfflineAudioContext(2, Math.ceil(SR * len), SR);
+  const lib = audioLib(ctx);
+  // world sounds get the same reverb send as in the game
+  let wet = null;
+  if (WORLD_SFX.has(name)) {
+    wet = ctx.createConvolver(); wet.buffer = lib.sfxIR; const g = ctx.createGain(); g.gain.value = 0.55; wet.connect(g); g.connect(ctx.destination);
+  }
+  SFX[name](ctx, ctx.destination, 0.02, opts || {}, lib, wet);
+  return ctx.startRendering();
+}
+async function renderMood(mood, seconds) {
+  const ctx = new OfflineAudioContext(2, SR * seconds, SR);
+  const d = new MusicDirector(ctx, ctx.destination);
+  d.setMood(mood, 0);
+  d.scheduleUntil(seconds);
+  return ctx.startRendering();
+}
+async function renderFlight(params, seconds = 3) {
+  const ctx = new OfflineAudioContext(2, SR * seconds, SR);
+  const f = new FlightSoundscape(ctx, ctx.destination);
+  f.update(0.016, params);
+  return ctx.startRendering();
+}
+
+async function runChecks() {
+  const t0 = performance.now();
+  // 1) sound effects: every recipe must be audible, finite and must not clip on its own
+  for (const [n, o] of VARIANTS) {
+    const buf = await renderSfx(n, o);
+    const a = analyse(buf);
+    let ok = !a.nan && a.peak > 0.004 && a.peak < 0.98, why = a.nan ? 'NaN' : a.peak <= 0.004 ? 'silent' : a.peak >= 0.98 ? 'clipping' : '';
+    addRow('sfx', label(n, o), buf, a, { tail: a.activeSec.toFixed(2) + 's' }, ok, why);
+  }
+  // loudness sanity: UI sounds must sit well below big world sounds
+  const pk = (nm) => results.sfx.find(r => r.name.startsWith(nm))?.peakDb ?? 0;
+  if (!(pk('click') < pk('explosion size:4') - 10)) results.failures.push('balance: click not ≥10 dB below a big explosion');
+  if (!(pk('hover') < pk('click'))) results.failures.push('balance: hover should be quieter than click');
+  // 2) music moods: non-silent throughout, not clipping, evolving, and distinct in rhythmic activity
+  const MUSIC_SEC = 26;
+  for (const m of MOOD_NAMES) {
+    const buf = await renderMood(m, MUSIC_SEC);
+    const a = analyse(buf);
+    const w = windows(buf, 2).slice(2);                      // skip the first 4 s (pads fade in)
+    const wMin = Math.min(...w), wMax = Math.max(...w);
+    const ons = onsetsPerSec(buf);
+    const ok = !a.nan && a.peak < 0.98 && a.peak > 0.01 && dB(wMin) > -58;
+    const why = a.nan ? 'NaN' : a.peak >= 0.98 ? 'clipping' : a.peak <= 0.01 ? 'silent' : dB(wMin) <= -58 ? 'dead silence window' : '';
+    addRow('music', m, buf, a, { win: `${dB(wMin).toFixed(0)}..${dB(wMax).toFixed(0)}dB`, onsets: ons.toFixed(2) + '/s' }, ok, why);
+  }
+  const ons = Object.fromEntries(results.music.map(r => [r.name, parseFloat(r.onsets)]));
+  if (!(ons.vab > ons.flight * 1.5)) results.failures.push(`music: vab (${ons.vab}) should be much busier than flight (${ons.flight})`);
+  // 3) flight soundscape configurations
+  const FL = [
+    ['idle (no thrust, no air)', { thrustFrac: 0, pressure: 0 }, 'silent'],
+    ['SRB+liquid full thrust, sea level', { thrustFrac: 1, solidFrac: 0.6, pressure: 101, dynPressure: 2, mach: 0.1, cameraDist: 20 }, 'loud'],
+    ['liquid engine in vacuum', { thrustFrac: 1, solidFrac: 0, pressure: 0, cameraDist: 15 }, 'audible'],
+    ['max-Q wind, transonic', { thrustFrac: 0.7, solidFrac: 0, pressure: 40, dynPressure: 28, mach: 1.0, cameraDist: 25 }, 'loud'],
+    ['reentry, no engines', { thrustFrac: 0, pressure: 5, dynPressure: 20, mach: 7, reentry: 0.9, cameraDist: 15 }, 'loud'],
+    ['paused (full thrust)', { thrustFrac: 1, solidFrac: 1, pressure: 101, paused: true }, 'silent'],
+    ['rails warp 1000×', { thrustFrac: 0, pressure: 0, dynPressure: 0, warpRate: 1000 }, 'silent'],
+  ];
+  for (const [name, p, expect] of FL) {
+    const buf = await renderFlight({ solidFrac: 0, dynPressure: 0, mach: 0, reentry: 0, warpRate: 1, paused: false, cameraDist: 20, ...p });
+    // judge the steady state (skip the first 0.6 s of parameter smoothing)
+    const start = Math.floor(SR * 0.6), d = buf.getChannelData(0);
+    let peak = 0, e = 0; for (let i = start; i < d.length; i++) { const v = Math.abs(d[i]); if (v > peak) peak = v; e += v * v; }
+    const rms = Math.sqrt(e / (d.length - start));
+    const a = analyse(buf); a.peak = peak; a.rms = rms;
+    let ok, why = '';
+    if (expect === 'silent') { ok = peak < 0.003; why = ok ? '' : 'should be silent'; }
+    else if (expect === 'loud') { ok = rms > 0.02 && peak < 0.98; why = ok ? '' : peak >= 0.98 ? 'clipping' : 'too quiet'; }
+    else { ok = rms > 0.004 && peak < 0.98; why = ok ? '' : 'too quiet'; }
+    if (a.nan) { ok = false; why = 'NaN'; }
+    addRow('flight', name, buf, a, {}, ok, why);
+  }
+  const vac = results.flight.find(r => r.name.startsWith('liquid engine in vacuum')), sea = results.flight.find(r => r.name.startsWith('SRB'));
+  if (vac && sea && !(vac.centroid < sea.centroid * 0.7)) results.failures.push('flight: vacuum engine should be much duller (lowpassed) than at sea level');
+
+  results.ms = Math.round(performance.now() - t0);
+  results.pass = results.failures.length === 0;
+  results.counts = { sfx: results.sfx.length, music: results.music.length, flight: results.flight.length };
+  $('summary').innerHTML = `${results.pass ? '<b class="ok">ALL CHECKS PASSED</b>' : '<b class="bad">' + results.failures.length + ' FAILURE(S)</b>'} — ${results.counts.sfx} sfx, ${results.counts.music} moods × ${MUSIC_SEC}s, ${results.counts.flight} flight configs rendered offline in ${results.ms} ms` +
+    (results.failures.length ? '<br>' + results.failures.map(f => '• ' + f).join('<br>') : '');
+  window.__audioResults = results;
+  window.__testReady = true;
+}
+runChecks().catch((e) => { console.error(e); $('summary').textContent = 'ERROR: ' + e.message; window.__audioResults = { error: String(e.stack || e) }; window.__testReady = true; });
+window.__audio = audio;
+</script>
+</body>
+</html>

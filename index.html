@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tiny Space Program</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M32 4c9 8 13 20 13 32l-6 8H25l-6-8c0-12 4-24 13-32z' fill='%23e6eefc'/%3E%3Ccircle cx='32' cy='26' r='5' fill='%233fa9ff'/%3E%3Cpath d='M25 44l-8 10 3-14zM39 44l8 10-3-14z' fill='%23ffb03f'/%3E%3Cpath d='M27 46h10l-5 14z' fill='%23ff6a2a'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" media="print" onload="this.media='all'"
+        href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="src/ui/base.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./node_modules/three/build/three.module.js",
+      "three/addons/": "./node_modules/three/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="game-canvas" tabindex="0"></canvas>
+  <div id="ui-root"></div>
+  <div id="toast-root"></div>
+  <div id="loading">
+    <div class="logo">Tiny <span>Space</span> Program</div>
+    <div class="bar"><div></div></div>
+    <div class="tip">Loading…</div>
+  </div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

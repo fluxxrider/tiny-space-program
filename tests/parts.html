@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>parts3d — part models, plumes, chutes, legs</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b1220; color: #e6eefc; font-family: "Arial Narrow", Arial, sans-serif; overflow: hidden; }
+  canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #labels { position: fixed; inset: 0; pointer-events: none; }
+  .lbl { position: absolute; transform: translate(-50%, 0); font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+         color: #cfe0ff; text-shadow: 0 1px 2px #000, 0 0 6px #000; white-space: nowrap; }
+  .lbl small { display: block; text-align: center; font-weight: 400; color: #8ea3c4; font-size: 10px; }
+  .cap { position: fixed; top: 10px; font-size: 15px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #fff;
+         text-shadow: 0 1px 3px #000; padding: 4px 10px; background: rgba(0,0,0,.35); border-radius: 6px; }
+  #thumbs { position: fixed; inset: 0; overflow: auto; padding: 18px; display: none;
+            background: radial-gradient(circle at 30% 20%, #1c2a44, #0b1220 70%); }
+  #thumbs .grid { display: grid; grid-template-columns: repeat(auto-fill, 150px); gap: 10px; }
+  #thumbs .t { background: rgba(20,32,52,.8); border: 1px solid rgba(120,170,255,.22); border-radius: 10px; padding: 6px; text-align: center; }
+  #thumbs .t img { width: 128px; height: 128px; display: block; margin: 0 auto; }
+  #thumbs .t div { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #cfe0ff; margin-top: 2px; }
+  #thumbs .t span { font-size: 10px; color: #8ea3c4; }
+  #thumbs h2 { margin: 16px 0 8px; font-size: 13px; letter-spacing: .15em; color: #8ea3c4; text-transform: uppercase; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js", "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="labels"></div>
+<div id="thumbs"></div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { PART_LIST, PART_CATEGORIES, getPart } from '../src/data/parts.js';
+import { buildPartMesh, partBounds, renderPartThumbnail } from '../src/render/partMeshes.js';
+import { VesselRenderer, highlightPartObject } from '../src/render/vesselRenderer.js';
+import { createPartEnvironment as createEnv, setGhostColor } from '../src/render/materials.js';
+// ?noenv=1 leaves scene.environment empty to exercise the automatic part environment fallback
+const createPartEnvironment = (r, o) => (new URLSearchParams(location.search).get('noenv') === '1' ? null : createEnv(r, o));
+
+const params = new URLSearchParams(location.search);
+const VIEW = params.get('view') || 'grid';
+const canvas = document.getElementById('c');
+const labels = document.getElementById('labels');
+window.__errors = [];
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+const W = () => innerWidth, H = () => innerHeight;
+
+// ───────────── mock vessel helpers (stack by nodes, radial attach) ─────────────
+let uidCounter = 1;
+function mkPart(id, pos, rot = new THREE.Quaternion(), extra = {}) {
+  const def = getPart(id);
+  const p = { uid: 'p' + uidCounter++, id, def, pos: pos.clone(), rot: rot.clone(), temp: 290, ...extra };
+  if (def.modules.engine) p.engine = { active: true, throttleEff: 1, thrust: 0, flameout: false, gimbal: new THREE.Vector2() };
+  if (def.modules.parachute) p.chute = { state: 'stowed', t: 0 };
+  if (def.modules.legs) p.legs = { deployed: false, t: 0, compression: 0 };
+  if (def.modules.fin) p.fin = { deflection: 0 };
+  if (def.modules.rcs) p.rcs = { firing: [0, 0, 0, 0] };
+  return p;
+}
+/** Stack ids top → bottom; the first part sits at y = top. Returns the parts. */
+function stack(ids, top = 0) {
+  const out = [];
+  let y = top, prev = null;
+  for (const id of ids) {
+    const d = getPart(id);
+    if (prev) y = y + prev.def.nodes.bottom.pos[1] - d.nodes.top.pos[1];
+    else y = top - (d.nodes.top ? d.nodes.top.pos[1] : d.height / 2);
+    const p = mkPart(id, new THREE.Vector3(0, y, 0));
+    out.push(p); prev = p;
+  }
+  return out;
+}
+/** Surface-attach `id` to `parent` at angle phi (0 = +Z) and local height dy; child +X points outward. */
+function radial(parent, id, phi, dy = 0, extraOut = 0) {
+  const d = getPart(id);
+  const dir = new THREE.Vector3(Math.sin(phi), 0, Math.cos(phi));
+  const rot = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), phi - Math.PI / 2);
+  const sa = new THREE.Vector3(...(d.srfAttach || [0, 0, 0])).applyQuaternion(rot);
+  const pos = parent.pos.clone().add(new THREE.Vector3(0, dy, 0)).addScaledVector(dir, parent.def.radius + extraOut).sub(sa);
+  return mkPart(id, pos, rot);
+}
+function vessel(parts, extra = {}) {
+  return { id: 'v' + uidCounter++, parts, rot: new THREE.Quaternion(), telemetry: { surfacePrograde: new THREE.Vector3(0, -1, 0), surfaceSpeed: 8, staticPressure: 101 }, ...extra };
+}
+
+// ───────────── scene setup ─────────────
+function lights(scene, { shadow = 40, sunPos = [30, 60, 40], sun = 3.0, hemi = 0.6 } = {}) {
+  scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x4a4036, hemi));
+  const s = new THREE.DirectionalLight(0xfff1dc, sun);
+  s.position.set(...sunPos);
+  s.castShadow = true;
+  s.shadow.mapSize.set(2048, 2048);
+  s.shadow.camera.left = -shadow; s.shadow.camera.right = shadow; s.shadow.camera.top = shadow; s.shadow.camera.bottom = -shadow;
+  s.shadow.camera.far = 300; s.shadow.bias = -0.0004; s.shadow.normalBias = 0.02;
+  scene.add(s);
+  return s;
+}
+function ground(scene, size = 400) {
+  const c = document.createElement('canvas'); c.width = c.height = 512;
+  const g = c.getContext('2d');
+  g.fillStyle = '#62666c'; g.fillRect(0, 0, 512, 512);
+  for (let i = 0; i < 3000; i++) { g.fillStyle = `rgba(${Math.random() < .5 ? '0,0,0' : '255,255,255'},${Math.random() * .06})`; g.fillRect(Math.random() * 512, Math.random() * 512, 2 + Math.random() * 4, 2 + Math.random() * 4); }
+  g.strokeStyle = 'rgba(40,40,45,.55)'; g.lineWidth = 3; g.strokeRect(0, 0, 512, 512);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(size / 8, size / 8); t.anisotropy = 8;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshStandardMaterial({ map: t, roughness: 0.92 }));
+  m.rotation.x = -Math.PI / 2; m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+function starfield(scene) {
+  const n = 2500, p = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { const v = new THREE.Vector3().randomDirection().multiplyScalar(900); p.set([v.x, v.y, v.z], i * 3); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  const pts = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false }));
+  scene.add(pts);
+}
+function skyTexture(top, bottom) {
+  const c = document.createElement('canvas'); c.width = 4; c.height = 256;
+  const g = c.getContext('2d'); const grd = g.createLinearGradient(0, 0, 0, 256);
+  grd.addColorStop(0, top); grd.addColorStop(1, bottom); g.fillStyle = grd; g.fillRect(0, 0, 4, 256);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+
+/** Place a perspective camera looking along -dir so the box fits. */
+function fitCamera(cam, box, dir, aspect = W() / H()) {
+  cam.aspect = aspect; cam.updateProjectionMatrix();
+  const c = box.getCenter(new THREE.Vector3());
+  const f = dir.clone().normalize();
+  const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), f).normalize();
+  const up = new THREE.Vector3().crossVectors(f, right);
+  const tv = Math.tan(cam.fov * Math.PI / 360), th = tv * cam.aspect;
+  let d = 0;
+  for (let i = 0; i < 8; i++) {
+    const q = new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).sub(c);
+    d = Math.max(d, Math.abs(q.dot(right)) / th + q.dot(f), Math.abs(q.dot(up)) / tv + q.dot(f));
+  }
+  cam.position.copy(c).addScaledVector(f, d * 1.04);
+  cam.lookAt(c);
+}
+
+function addLabel(text, sub) {
+  const d = document.createElement('div'); d.className = 'lbl'; d.innerHTML = text + (sub ? `<small>${sub}</small>` : '');
+  labels.appendChild(d); return d;
+}
+function placeLabel(el, pos, camera, rect = { x: 0, y: 0, w: W(), h: H() }) {
+  const v = pos.clone().project(camera);
+  el.style.left = (rect.x + (v.x * 0.5 + 0.5) * rect.w) + 'px';
+  el.style.top = (rect.y + (-v.y * 0.5 + 0.5) * rect.h) + 'px';
+}
+function caption(text, x) { const d = document.createElement('div'); d.className = 'cap'; d.textContent = text; d.style.left = x; document.body.appendChild(d); }
+
+// ───────────── views ─────────────
+const views = {
+  grid() {
+    const scene = new THREE.Scene();
+    scene.background = skyTexture('#23324d', '#0d1524');
+    scene.environment = createPartEnvironment(renderer, { preset: 'studio' });
+    lights(scene, { shadow: 30, sunPos: [20, 40, 60], sun: 2.6, hemi: 0.7 });
+    const only = params.get('only')?.split(',');
+    const cat = params.get('cat');
+    let list = PART_LIST.filter(d => (!only || only.includes(d.id)) && (!cat || d.category === cat));
+    const cols = Number(params.get('cols')) || Math.min(list.length, Math.ceil(Math.sqrt(list.length * 1.9)));
+    const rows = Math.ceil(list.length / cols);
+    const cw = 3.2, ch = 3.6;
+    const items = [];
+    list.forEach((def, i) => {
+      const ghost = params.get('ghost') === '1' || params.get('ghost') === def.id;
+      const obj = buildPartMesh(def, { thumbnail: params.get('pose') === 'display', ghost, lod: Number(params.get('lod') || 0) });
+      if (params.get('highlight') === def.id) highlightPartObject(obj, 0x4fc3ff);
+      if (def.modules.legs && params.get('pose') !== 'stowed') obj.userData.animate({ legs: { t: 1, compression: 0 } }, 0, {});
+      const holder = new THREE.Group();
+      holder.add(obj);
+      const bb = partBounds(obj);
+      const size = bb.getSize(new THREE.Vector3()), center = bb.getCenter(new THREE.Vector3());
+      const s = Math.min(2.3 / Math.max(size.y, 0.001), 2.5 / Math.max(size.x, size.z, 0.001));
+      obj.position.copy(center).multiplyScalar(-1);
+      holder.scale.setScalar(s);
+      holder.rotation.set(0.28, -0.62, 0);
+      const c = i % cols, r = Math.floor(i / cols);
+      holder.position.set((c - (cols - 1) / 2) * cw, ((rows - 1) / 2 - r) * ch + 0.25, 0);
+      scene.add(holder);
+      const lbl = addLabel(def.name, `${def.height} m · ${def.radius * 2} m Ø${s < 0.999 ? ` · ×${s.toFixed(2)}` : ''}`);
+      items.push({ lbl, pos: new THREE.Vector3(holder.position.x, holder.position.y - 1.55, 0) });
+    });
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 200);
+    const fit = () => {
+      const aw = cols * cw, ah = rows * ch;
+      const a = W() / H();
+      let hw = aw / 2 * 1.02, hh = ah / 2 * 1.04;
+      if (hw / hh > a) hh = hw / a; else hw = hh * a;
+      camera.left = -hw; camera.right = hw; camera.top = hh; camera.bottom = -hh; camera.updateProjectionMatrix();
+    };
+    camera.position.set(0, 0, 50); camera.lookAt(0, 0, 0); fit();
+    if (params.get('ghostColor')) setGhostColor(params.get('ghostColor'));
+    return {
+      render() { renderer.render(scene, camera); for (const it of items) placeLabel(it.lbl, it.pos, camera); },
+      update() {}, resize: fit,
+    };
+  },
+
+  vessels() {
+    // left: sea level (sky, ground); right: vacuum (space). Same engines, different ambient pressure.
+    const mk = (vac) => {
+      const scene = new THREE.Scene();
+      scene.background = vac ? new THREE.Color(0x020409) : skyTexture('#4f86d9', '#cfe0f2');
+      scene.environment = createPartEnvironment(renderer, { preset: vac ? 'space' : 'sky' });
+      lights(scene, { shadow: 30, sunPos: vac ? [40, 30, 50] : [30, 60, 40], sun: vac ? 3.6 : 2.8, hemi: vac ? 0.08 : 0.65 });
+      if (vac) starfield(scene); else ground(scene);
+      const vessels = [];
+      // Rocket A: capsule orbiter with Swivel + two Hammer SRBs on radial decouplers + control fins
+      {
+        const parts = stack(['chute_mk16', 'pod_mk1', 'heatshield_s1', 'decoupler_s1', 'tank_t400', 'tank_t800', 'eng_swivel'], 0);
+        const core = parts[5];
+        for (const phi of [Math.PI / 2, -Math.PI / 2]) {
+          const dec = radial(core, 'decoupler_radial', phi, -0.3);
+          const srbDef = getPart('srb_hammer');
+          const dir = new THREE.Vector3(Math.sin(phi), 0, Math.cos(phi));
+          const srb = mkPart('srb_hammer', dec.pos.clone().addScaledVector(dir, 0.2 + srbDef.radius).add(new THREE.Vector3(0, -0.5, 0)), dec.rot);
+          const nose = mkPart('nose_cone', srb.pos.clone().add(new THREE.Vector3(0, srbDef.height / 2 + 0.5, 0)), dec.rot);
+          parts.push(dec, srb, nose);
+        }
+        for (const phi of [0, Math.PI]) parts.push(radial(core, 'fin_control', phi, -1.4));
+        parts.find(p => p.id === 'eng_swivel').engine.gimbal.set(0.04, -0.02);
+        const v = vessel(parts); v.x = -7; vessels.push(v);
+      }
+      // Rocket B: heavy Mainsail stage
+      {
+        const parts = stack(['nose_cone', 'tank_t200', 'adapter_s2s1', 'tank_l32', 'eng_mainsail'], 0);
+        for (const phi of [0.6, 0.6 + Math.PI]) parts.push(radial(parts[3], 'fin_basic', phi, -1.4));
+        const v = vessel(parts); v.x = 4; vessels.push(v);
+      }
+      // Rocket C: Nerva + Terrier + Spark mini-stack
+      {
+        const parts = stack(['probe_core', 'tank_s0', 'eng_spark'], 0);
+        const v = vessel(parts); v.x = 11; v.y = 3; vessels.push(v);
+        const parts2 = stack(['nose_cone', 'tank_t400', 'eng_terrier'], 0);
+        const v2 = vessel(parts2); v2.x = 15; v2.y = 1; vessels.push(v2);
+        const parts3 = stack(['nose_cone', 'tank_t800', 'eng_nerv'], 0);
+        const v3 = vessel(parts3); v3.x = 19.5; vessels.push(v3);
+      }
+      const renderers = vessels.map(v => {
+        const vr = new VesselRenderer(v);
+        vr.update(0.016, v, { pressure: vac ? 0 : 101.325 });
+        const bb = new THREE.Box3().setFromObject(vr.group, true);
+        vr.group.position.set(v.x, (v.y || 0) + 26 - bb.min.y, 0);
+        scene.add(vr.group);
+        return { vr, v };
+      });
+      const box = new THREE.Box3();
+      for (const { vr } of renderers) { const b2 = new THREE.Box3().setFromObject(vr.group, true); box.union(b2); }
+      box.min.y -= vac ? 16 : 14;
+      const camera = new THREE.PerspectiveCamera(30, 0.9, 0.1, 3000);
+      fitCamera(camera, box, new THREE.Vector3(0.18, 0.08, 1), 0.9);
+      return { scene, camera, renderers, pressure: vac ? 0 : 101.325 };
+    };
+    const L = mk(false), R = mk(true);
+    caption('Sea level · 101 kPa', '14px'); caption('Vacuum · 0 kPa', 'calc(50% + 14px)');
+    let t = 0;
+    return {
+      update(dt) {
+        t += dt;
+        for (const side of [L, R]) for (const { vr, v } of side.renderers) {
+          const eng = v.parts.find(p => p.engine && p.def.modules.engine.type !== 'solid');
+          if (eng && params.get('throttle')) eng.engine.throttleEff = Number(params.get('throttle'));
+          vr.update(dt, v, { pressure: side.pressure, camera: side.camera, ut: t });
+        }
+      },
+      render() {
+        const w = W(), h = H();
+        renderer.setScissorTest(true);
+        for (const [side, x] of [[L, 0], [R, w / 2]]) {
+          renderer.setViewport(x, 0, w / 2, h); renderer.setScissor(x, 0, w / 2, h);
+          renderer.render(side.scene, side.camera);
+        }
+        renderer.setScissorTest(false);
+      },
+      resize() {},
+    };
+  },
+
+  landing() {
+    const scene = new THREE.Scene();
+    scene.background = skyTexture('#5b8fdc', '#d9e6f2');
+    scene.environment = createPartEnvironment(renderer, { preset: 'sky' });
+    lights(scene, { shadow: 30, sunPos: [-25, 45, 35], sun: 3.0, hemi: 0.6 });
+    ground(scene);
+    const vs = [];
+    // Lander on deployed legs (+ Terrier firing gently)
+    {
+      const parts = stack(['lander_can', 'tank_t200', 'eng_terrier'], 0);
+      const tank = parts[1];
+      for (let k = 0; k < 4; k++) parts.push(radial(tank, 'legs_lt1', k * Math.PI / 2 + Math.PI / 4, -0.2));
+      parts.push(radial(parts[0], 'rcs_block', Math.PI / 4 + 0.3, 0.1));
+      parts.push(radial(parts[0], 'rcs_block', -Math.PI / 4 - 0.3, 0.1));
+      parts.push(radial(tank, 'solar_panel', 0.0, 0.3));
+      parts.push(radial(parts[0], 'antenna', -2.2, 0.0));
+      parts.push(radial(tank, 'battery', Math.PI, 0.2));
+      for (const p of parts) { if (p.legs) Object.assign(p.legs, { deployed: true, t: 1, compression: 0.25 }); }
+      parts[2].engine.throttleEff = 0.35;
+      parts.find(p => p.id === 'rcs_block').rcs.firing = [1, 0, 0.6, 0];
+      const v = vessel(parts, { telemetry: { surfacePrograde: new THREE.Vector3(0, -1, 0), surfaceSpeed: 2, staticPressure: 101 } });
+      const vr = new VesselRenderer(v);
+      vr.update(0.016, v, { pressure: 101 });
+      const bb = new THREE.Box3().setFromObject(vr.group, true);
+      vr.group.position.set(-2.5, 1.8 - bb.min.y, 0);
+      scene.add(vr.group); vs.push({ vr, v, pressure: 101 });
+    }
+    // Capsule under a fully deployed chute, drifting slightly (canopy trails up-wind)
+    {
+      const parts = stack(['chute_mk16', 'pod_mk1', 'heatshield_s1'], 0);
+      parts[0].chute = { state: 'deployed', t: 1 };
+      const v = vessel(parts, { telemetry: { surfacePrograde: new THREE.Vector3(0.18, -1, 0.05).normalize(), surfaceSpeed: 7, staticPressure: 101 } });
+      const vr = new VesselRenderer(v);
+      vr.group.position.set(4.5, 5.2, -6);
+      scene.add(vr.group); vs.push({ vr, v, pressure: 101 });
+    }
+    // Trio pod with XL chute semi-deployed (streamer) + two radial chutes opening
+    {
+      const parts = stack(['chute_xl', 'pod_mk3', 'heatshield_s2'], 0);
+      parts[0].chute = { state: 'semi', t: 0 };
+      for (const phi of [Math.PI / 2, -Math.PI / 2]) { const c = radial(parts[1], 'chute_radial', phi, -0.1); c.chute = { state: 'deployed', t: 0.0, _grow: true }; parts.push(c); }
+      const v = vessel(parts, { telemetry: { surfacePrograde: new THREE.Vector3(-0.1, -1, 0).normalize(), surfaceSpeed: 40, staticPressure: 90 } });
+      const vr = new VesselRenderer(v);
+      vr.group.position.set(13, 13, -16);
+      scene.add(vr.group); vs.push({ vr, v, pressure: 90 });
+    }
+    // Reentry: capsule glowing hot, heat shield white-hot
+    {
+      const parts = stack(['pod_mk1', 'heatshield_s1'], 0);
+      parts[0].temp = 0.72 * parts[0].def.maxTemp;
+      parts[1].temp = 0.98 * parts[1].def.maxTemp;
+      const v = vessel(parts, { telemetry: { surfacePrograde: new THREE.Vector3(0.45, -1, 0.3).normalize(), surfaceSpeed: 2200, staticPressure: 20 } });
+      const vr = new VesselRenderer(v);
+      vr.group.position.set(-7.5, 10.5, -8);
+      vr.group.rotation.set(0.35, 0.4, 0.5);
+      scene.add(vr.group); vs.push({ vr, v, pressure: 20 });
+      vr.setHighlight(null);
+    }
+    // a highlighted part (hover) on the lander
+    vs[0].vr.setHighlight(vs[0].v.parts[1].uid, 0x4fc3ff);
+    const camera = new THREE.PerspectiveCamera(40, W() / H(), 0.1, 2000);
+    camera.position.set(-1.5, 4.2, 13.5);
+    camera.lookAt(1.5, 7.2, -4);
+    let t = 0;
+    return {
+      update(dt) {
+        t += dt;
+        for (const { vr, v, pressure } of vs) {
+          for (const p of v.parts) if (p.chute && p.chute._grow) p.chute.t = Math.min(1, p.chute.t + dt / 2.2);
+          vr.update(dt, v, { pressure, camera, ut: t });
+        }
+      },
+      render() { renderer.render(scene, camera); },
+      resize() { camera.aspect = W() / H(); camera.updateProjectionMatrix(); },
+      scene, camera,
+    };
+  },
+
+  closeup() {
+    // A single part up close (?part=id), orbitable; engines fire with ?throttle=…&pressure=…
+    const id = params.get('part') || 'eng_mainsail';
+    const scene = new THREE.Scene();
+    scene.background = skyTexture('#23324d', '#0d1524');
+    scene.environment = createPartEnvironment(renderer, { preset: 'studio' });
+    lights(scene, { shadow: 12, sunPos: [10, 20, 16], sun: 2.6, hemi: 0.6 });
+    const parts = [mkPart(id, new THREE.Vector3())];
+    if (parts[0].engine) parts[0].engine.throttleEff = Number(params.get('throttle') ?? 0);
+    if (parts[0].legs) Object.assign(parts[0].legs, { t: Number(params.get('t') ?? 1) });
+    if (parts[0].chute && params.get('chute')) parts[0].chute = { state: params.get('chute'), t: 1 };
+    if (params.get('temp')) parts[0].temp = Number(params.get('temp')) * parts[0].def.maxTemp;
+    if (params.get('tempK')) parts[0].temp = Number(params.get('tempK'));      // absolute (K)
+    if (parts[0].rcs && params.get('rcs')) parts[0].rcs.firing = params.get('rcs').split(',').map(Number);
+    const v = vessel(parts);
+    const vr = new VesselRenderer(v);
+    scene.add(vr.group);
+    for (let i = 0; i < 90; i++) vr.update(0.033, v, { pressure: 101 });
+    window.__vr = vr;
+    for (const h of (params.get('hide') || '').split(',').filter(Boolean)) {
+      const pl = [...vr.views.values()][0].plume;
+      if (pl && pl[h]) pl[h].visible = false;
+    }
+    const obj0 = [...vr.views.values()][0].obj;
+    const bb = parts[0].chute && parts[0].chute.state !== 'stowed' ? new THREE.Box3().setFromObject(vr.group, true) : partBounds(obj0);
+    const c = bb.getCenter(new THREE.Vector3()), s = bb.getSize(new THREE.Vector3());
+    c.y += Number(params.get('ty') || 0);
+    const d = Math.max(s.x, s.y, s.z) * (Number(params.get('zoom')) || 1.9);
+    const camera = new THREE.PerspectiveCamera(35, W() / H(), 0.01, 500);
+    const az = Number(params.get('az') ?? 0.6), el = Number(params.get('el') ?? 0.3);
+    camera.position.set(c.x + Math.sin(az) * Math.cos(el) * d, c.y + Math.sin(el) * d, c.z + Math.cos(az) * Math.cos(el) * d);
+    const controls = new OrbitControls(camera, canvas); controls.target.copy(c); controls.update();
+    let t = 0;
+    return {
+      update(dt) { t += dt; vr.update(dt, v, { pressure: Number(params.get('pressure') ?? 101), camera, ut: t }); controls.update(); },
+      render() { renderer.render(scene, camera); },
+      resize() { camera.aspect = W() / H(); camera.updateProjectionMatrix(); },
+      scene, camera,
+    };
+  },
+
+  burn() {
+    // In-game-like engine burn: Orbiter I upper stage (or ?stack=id,id,…) in space (or ?pressure=kPa over a sky),
+    // chase camera at ?dist m / ?az / ?el; use &bloom=game for the flight scene's bloom (strength 0.32, threshold 1).
+    const pressure = Number(params.get('pressure') ?? 0);
+    const vac = pressure < 5;
+    const scene = new THREE.Scene();
+    scene.background = vac ? new THREE.Color(0x020409) : skyTexture('#4f86d9', '#cfe0f2');
+    scene.environment = createPartEnvironment(renderer, { preset: vac ? 'space' : 'sky' });
+    lights(scene, { shadow: 12, sunPos: [40, 25, 30], sun: 3.3, hemi: vac ? 0.05 : 0.6 });
+    if (vac) starfield(scene);
+    const ids = (params.get('stack') || 'chute_mk16,pod_mk1,heatshield_s1,decoupler_s1,tank_t400,eng_terrier').split(',');
+    const parts = stack(ids, 0);
+    const thr = Number(params.get('throttle') ?? 1);
+    for (const p of parts) if (p.engine) p.engine.throttleEff = thr;
+    const v = vessel(parts, { telemetry: { surfacePrograde: new THREE.Vector3(0, 1, 0), surfaceSpeed: 2200, staticPressure: pressure } });
+    const vr = new VesselRenderer(v);
+    scene.add(vr.group);
+    const bb = new THREE.Box3();
+    for (const p of parts) bb.union(partBounds(vr.getPartObject(p.uid)).translate(p.pos));
+    const c = bb.getCenter(new THREE.Vector3());
+    c.y -= Number(params.get('ty') ?? 1.5);
+    const d = Number(params.get('dist') ?? 14);
+    const az = Number(params.get('az') ?? 1.3), el = Number(params.get('el') ?? 0.15);
+    const camera = new THREE.PerspectiveCamera(60, W() / H(), 0.05, 5000);
+    camera.position.set(c.x + Math.sin(az) * Math.cos(el) * d, c.y + Math.sin(el) * d, c.z + Math.cos(az) * Math.cos(el) * d);
+    camera.lookAt(c);
+    let t = 0;
+    for (let i = 0; i < 40; i++) vr.update(0.033, v, { pressure, camera, ut: 0 });
+    window.__vr = vr;
+    return {
+      update(dt) { t += dt; vr.update(dt, v, { pressure, camera, ut: t }); },
+      render() { renderer.render(scene, camera); },
+      resize() { camera.aspect = W() / H(); camera.updateProjectionMatrix(); },
+      scene, camera,
+    };
+  },
+
+  night() {
+    // Night visibility kit: the planet's shadow (no sun, faint sky), forced night = 1 (?night=0..1).
+    // Centre: capsule under a deployed chute (the "active" vessel: owns the moonlight fill); left: lander can with
+    // LIGHTS on (searchlight + lamp, cabin glow); right: Trio pod; front: probe core. ?fill=0 → no fill light.
+    const night = Number(params.get('night') ?? 1);
+    const scene = new THREE.Scene();
+    scene.background = skyTexture('#060a14', '#0b1322');
+    scene.environment = createPartEnvironment(renderer, { preset: 'space' });
+    lights(scene, { shadow: 30, sunPos: [-25, 45, 35], sun: 3.3 * (1 - night), hemi: 0.03 + 0.6 * (1 - night) });
+    starfield(scene);
+    const vs = [];
+    const add = (parts, pos, extra = {}, opts = {}) => {
+      const v = vessel(parts, extra);
+      const vr = new VesselRenderer(v, opts);
+      vr.group.position.copy(pos);
+      scene.add(vr.group); vs.push({ vr, v });
+      return { vr, v };
+    };
+    {
+      const parts = stack(['chute_mk16', 'pod_mk1', 'heatshield_s1'], 0);
+      parts[0].chute = { state: 'deployed', t: 1 };
+      add(parts, new THREE.Vector3(0, 0, 0), { crew: [{ name: 'Zeb' }], controls: { lights: params.get('lights') === '1' },
+        telemetry: { surfacePrograde: new THREE.Vector3(0.1, -1, 0.05).normalize(), surfaceSpeed: 7, staticPressure: 101 } },
+        { lights: params.get('fill') !== '0' });
+    }
+    {
+      const parts = stack(['lander_can', 'tank_t200', 'eng_terrier'], 0);
+      for (let k = 0; k < 4; k++) parts.push(radial(parts[1], 'legs_lt1', k * Math.PI / 2 + Math.PI / 4, -0.2));
+      for (const p of parts) if (p.legs) Object.assign(p.legs, { deployed: true, t: 1, compression: 0.2 });
+      parts[2].engine.throttleEff = 0;
+      add(parts, new THREE.Vector3(-5, -3, -3), { crew: [{ name: 'Bob' }], controls: { lights: true } }, { lights: false });
+    }
+    {
+      const parts = stack(['pod_mk3', 'heatshield_s2'], 0);
+      add(parts, new THREE.Vector3(5.5, -2, -4), { crew: [{ name: 'A' }, { name: 'B' }] }, { lights: false });
+    }
+    {
+      const parts = stack(['probe_core', 'tank_s0'], 0);
+      add(parts, new THREE.Vector3(1.8, -2.6, 2.5), { type: 'probe' }, { lights: false });
+    }
+    const camera = new THREE.PerspectiveCamera(50, W() / H(), 0.05, 3000);
+    const d = Number(params.get('dist') ?? 13), az = Number(params.get('az') ?? 0.35), el = Number(params.get('el') ?? 0.05);
+    const target = new THREE.Vector3(0, Number(params.get('ty') ?? 1.5), 0);
+    camera.position.set(Math.sin(az) * Math.cos(el) * d, target.y + Math.sin(el) * d, Math.cos(az) * Math.cos(el) * d);
+    camera.lookAt(target);
+    let t = Number(params.get('t0') ?? 0);
+    for (let i = 0; i < 30; i++) for (const { vr, v } of vs) vr.update(0.033, v, { pressure: 101, camera, ut: 0, night });
+    window.__vs = vs;
+    return {
+      update(dt) { t += dt; for (const { vr, v } of vs) vr.update(dt, v, { pressure: 101, camera, ut: t, night }); },
+      render() { renderer.render(scene, camera); },
+      resize() { camera.aspect = W() / H(); camera.updateProjectionMatrix(); },
+      scene, camera,
+    };
+  },
+
+  anim() {
+    // timeline: chute stowed → semi (0.6 s) → deployed (2.2 s, opens over 2 s); legs deploy 0.6 → 1.8 s; engine throttles up
+    const scene = new THREE.Scene();
+    scene.background = skyTexture('#5b8fdc', '#d9e6f2');
+    scene.environment = createPartEnvironment(renderer, { preset: 'sky' });
+    lights(scene, { shadow: 20, sunPos: [-25, 45, 35], sun: 3.0, hemi: 0.6 });
+    ground(scene);
+    const cap = stack(['chute_mk16', 'pod_mk1', 'heatshield_s1'], 0);
+    const cv = vessel(cap, { telemetry: { surfacePrograde: new THREE.Vector3(0.1, -1, 0).normalize(), surfaceSpeed: 60, staticPressure: 101 } });
+    const cr = new VesselRenderer(cv); cr.group.position.set(-3, 3, 0); scene.add(cr.group);
+    const lp = stack(['lander_can', 'tank_t200', 'eng_terrier'], 0);
+    for (let k = 0; k < 4; k++) lp.push(radial(lp[1], 'legs_lt1', k * Math.PI / 2 + Math.PI / 4, -0.2));
+    lp.push(radial(lp[0], 'fin_control', Math.PI / 2, 0));
+    const lv = vessel(lp);
+    const lr = new VesselRenderer(lv); lr.group.position.set(4, 3.6, 0); scene.add(lr.group);
+    const camera = new THREE.PerspectiveCamera(42, W() / H(), 0.1, 1000);
+    camera.position.set(0, 9, 26); camera.lookAt(0, 9, 0);
+    let t = 0;
+    const clock = document.createElement('div'); clock.className = 'cap'; clock.style.left = '14px'; document.body.appendChild(clock);
+    return {
+      update(dt) {
+        t += dt;
+        const ch = cap[0].chute;
+        if (t < 0.6) ch.state = 'armed';
+        else if (t < 2.2) { ch.state = 'semi'; }
+        else { ch.state = 'deployed'; ch.t = Math.min(1, (t - 2.2) / 2); }
+        const lt = Math.max(0, Math.min(1, (t - 0.6) / 1.2));
+        for (const p of lp) if (p.legs) Object.assign(p.legs, { deployed: true, t: lt, compression: 0 });
+        lp[2].engine.throttleEff = Math.min(1, t / 3) * 0.6;
+        lp.find(p => p.fin).fin.deflection = Math.sin(t * 2) * 0.3;
+        cr.update(dt, cv, { pressure: 101, camera, ut: t });
+        lr.update(dt, lv, { pressure: 101, camera, ut: t });
+        clock.textContent = 't = ' + t.toFixed(2) + ' s · chute ' + ch.state + (ch.state === 'deployed' ? ' ' + ch.t.toFixed(2) : '') + ' · legs ' + lt.toFixed(2);
+      },
+      render() { renderer.render(scene, camera); },
+      resize() { camera.aspect = W() / H(); camera.updateProjectionMatrix(); },
+      scene, camera,
+    };
+  },
+
+  async thumbs() {
+    canvas.style.display = 'none';
+    const root = document.getElementById('thumbs'); root.style.display = 'block';
+    const size = Number(params.get('size')) || 128;
+    const t0 = performance.now();
+    for (const cat of PART_CATEGORIES) {
+      const list = PART_LIST.filter(d => d.category === cat.id);
+      if (!list.length) continue;
+      const h = document.createElement('h2'); h.textContent = cat.name; root.appendChild(h);
+      const grid = document.createElement('div'); grid.className = 'grid'; root.appendChild(grid);
+      for (const def of list) {
+        const cell = document.createElement('div'); cell.className = 't';
+        const img = document.createElement('img'); cell.appendChild(img);
+        const n = document.createElement('div'); n.textContent = def.name; cell.appendChild(n);
+        grid.appendChild(cell);
+        renderPartThumbnail(def, size).then(url => { img.src = url; });
+      }
+    }
+    await Promise.all(PART_LIST.map(d => renderPartThumbnail(d, size)));
+    console.log('thumbnails: ' + PART_LIST.length + ' in ' + Math.round(performance.now() - t0) + ' ms');
+    // cache check: second request resolves to the same promise
+    console.log('thumb cache hit: ' + (renderPartThumbnail(PART_LIST[0], size) === renderPartThumbnail(PART_LIST[0], size)));
+    return { update() {}, render() {}, resize() {} };
+  },
+};
+
+let view;
+try {
+  view = await views[VIEW]();
+} catch (e) { console.error(e); window.__errors.push(String(e.stack || e)); }
+
+// optional bloom (?bloom=1) for single-scene views, to preview plumes the way a bloom-enabled game renders them
+let composer = null;
+if ((params.get('bloom') === '1' || params.get('bloom') === 'game') && view?.scene && view?.camera) {
+  const game = params.get('bloom') === 'game';   // same settings as the flight scene (post.js)
+  composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(view.scene, view.camera));
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(W(), H()), game ? 0.32 : 0.55, game ? 0.55 : 0.5, game ? 1 : 0.82));
+  composer.addPass(new OutputPass());
+  view.render = () => composer.render();
+}
+
+let last = performance.now();
+let frames = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  try { view?.update(Number(params.get('dt')) || dt); view?.render(); }
+  catch (e) { console.error(e); window.__errors.push(String(e.stack || e)); }
+  frames++;
+  if (frames === 3) {
+    window.__testReady = true;
+    const info = renderer.info;
+    console.log(`view=${VIEW} draws=${info.render.calls} tris=${info.render.triangles} geos=${info.memory.geometries} tex=${info.memory.textures} programs=${info.programs?.length}`);
+  }
+  requestAnimationFrame(frame);
+}
+addEventListener('resize', () => { renderer.setSize(W(), H(), false); view?.resize?.(); });
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

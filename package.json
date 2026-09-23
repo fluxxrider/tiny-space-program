@@ -1,0 +1,17 @@
+{
+  "name": "tiny-space-program",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Kerbal Space Program-inspired rocket building and orbital flight sandbox for the browser.",
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "test": "node tools/run-tests.mjs",
+    "build": "node tools/build.mjs"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "puppeteer-core": "^25.11.0",
+    "three": "^0.170.0"
+  }
+}

@@ -1,0 +1,9 @@
+<!doctype html><html><body style="margin:0;background:#000"><canvas id="c" width="320" height="200"></canvas>
+<script type="importmap">{"imports":{"three":"../node_modules/three/build/three.module.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+const r = new THREE.WebGLRenderer({canvas: document.getElementById('c'), logarithmicDepthBuffer: true});
+const s = new THREE.Scene(); const c = new THREE.PerspectiveCamera(60, 1.6, 0.1, 100); c.position.z = 3;
+s.add(new THREE.Mesh(new THREE.TorusKnotGeometry(0.7,0.25,100,16), new THREE.MeshNormalMaterial()));
+r.render(s, c); console.log('webgl ok', r.capabilities.isWebGL2, r.getContext().getParameter(r.getContext().VERSION));
+</script></body></html>

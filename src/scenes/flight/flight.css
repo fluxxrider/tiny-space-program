@@ -1,0 +1,36 @@
+/* Flight scene overlay (integration): screenshot flash, hidden-UI mode, placement of shell hints/toasts around the HUD.
+   The HUD, map and menus style themselves. */
+
+/* never eat clicks: base.css re-enables pointer events on direct #ui-root children */
+#ui-root > .fl-root, .fl-root { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+.fl-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+.fl-flash.on { animation: fl-flash 0.45s ease-out forwards; }
+@keyframes fl-flash { 0% { opacity: 0.55; } 100% { opacity: 0; } }
+
+/* F2: hide every overlay, not just the HUD */
+#ui-root.tsp-ui-hidden #sh-hints { display: none !important; }
+#ui-root.tsp-ui-hidden ~ #toast-root { display: none; }
+
+/* tutorial hints: LEFT column. 3D view: in the free band between the HUD's resources panel and staging stack (hints.js
+   measures it into --fl-hints-top / --fl-hints-max). The right column belongs to the orbit + maneuver panels
+   ("Warp to burn" must stay clickable) and the crew portraits. */
+#ui-root.fl-active .sh-hints {
+  left: 14px; right: auto; top: var(--fl-hints-top, 20vh); width: min(318px, 34vw);
+  max-height: var(--fl-hints-max, 45vh); overflow: hidden;
+}
+/* map view: the map's maneuver planner (top-left), focus bar (left middle) and node editor (right middle) take the sides;
+   the HUD hides the crew portraits there → bottom-right corner */
+#ui-root.fl-active.fl-map .sh-hints { left: auto; right: 14px; top: auto; bottom: 14px; max-height: calc(50vh - 190px); }
+#ui-root.fl-active:not(.fl-map) .sh-hint { animation-name: fl-hint-in; }
+#ui-root.fl-active:not(.fl-map) .sh-hint.sh-hint-out { animation-name: fl-hint-out; }
+@keyframes fl-hint-in { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+@keyframes fl-hint-out { to { opacity: 0; transform: translateX(-24px); } }
+#ui-root.fl-active .sh-hint-text { font-size: 14px; }
+#ui-root.fl-active .sh-hint-text .tsp-kbd {
+  display: inline-block; min-width: 1.5em; text-align: center; font-size: 12px; line-height: 1.35; padding: 0 5px; margin: 0 1px;
+  border-bottom-width: 2px; background: rgba(255, 255, 255, 0.1); color: #fff; font-weight: 700;
+}
+
+/* toasts: below the band of the HUD's big centred message (top 26 %, ≈ 6.4vh tall) so an SOI change / LIFTOFF / STAGE
+   message and a milestone toast can both be read, and clear of the altimeter / time-warp bar / recover button */
+#ui-root.fl-active ~ #toast-root { top: calc(32.5vh + 10px); }

@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Physics Flight Recorder</title>
+<link rel="stylesheet" href="../src/ui/base.css">
+<script type="importmap">{ "imports": { "three": "../node_modules/three/build/three.module.js" } }</script>
+<style>
+  html, body { overflow: auto; }
+  .viz-root {
+    color-scheme: dark;
+    --surface-1: #0e1828;
+    --text-primary: #e6eefc;
+    --text-secondary: #8ea3c4;
+    --text-muted: #5b6f8f;
+    --grid: rgba(120, 170, 255, 0.10);
+    --axis: rgba(120, 170, 255, 0.28);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    padding: 18px 22px 28px; max-width: 1280px; margin: 0 auto;
+  }
+  h1 { margin: 0 0 2px; font-size: 26px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .sub { color: var(--text-secondary); margin-bottom: 14px; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: 1.45fr 1fr; gap: 14px; }
+  .card { background: var(--surface-1); border: 1px solid var(--tsp-border); border-radius: 10px; padding: 12px 14px; position: relative; }
+  .card.wide { grid-column: 1 / -1; }
+  .card h2 { margin: 0; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-secondary); }
+  .card .what { font-size: 13px; color: var(--text-muted); margin: 2px 0 8px; }
+  .legend { display: flex; gap: 14px; font-size: 13px; color: var(--text-secondary); margin: 4px 0 2px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  canvas { width: 100%; display: block; }
+  .stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-top: 10px; }
+  .stat { background: rgba(22, 34, 54, 0.6); border-radius: 8px; padding: 7px 10px; }
+  .stat .k { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); }
+  .stat .v { font: 600 17px var(--tsp-mono); color: var(--text-primary); }
+  .pass { color: var(--tsp-good); } .fail { color: var(--tsp-bad); }
+  .tip { position: absolute; pointer-events: none; background: #0a1220; border: 1px solid var(--tsp-border-strong);
+    border-radius: 6px; padding: 5px 8px; font: 12px var(--tsp-mono); color: var(--text-primary); display: none; white-space: nowrap; z-index: 5; }
+  .checks { font: 13px var(--tsp-mono); color: var(--text-secondary); line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <h1>Physics Flight Recorder</h1>
+  <div class="sub">Live runs of <span class="tsp-mono">src/physics</span> in the browser: a scripted ascent to orbit, two reentries and a parachute descent. Every number below is simulated on load.</div>
+  <div class="grid">
+    <div class="card wide" id="c-ascent">
+      <h2>Ascent to orbit</h2>
+      <div class="what">Altitude over downrange distance, coloured by stage. 17 t rocket: Swivel + 2 Hammer boosters → Swivel → Terrier.</div>
+      <div class="legend" id="lg-ascent"></div>
+      <canvas id="cv-ascent" height="280"></canvas>
+      <div class="stats" id="st-ascent"></div>
+    </div>
+    <div class="card" id="c-heat">
+      <h2>Reentry heating</h2>
+      <div class="what">Hottest part as a fraction of its max temperature (1.0 = it burns up).</div>
+      <div class="legend" id="lg-heat"></div>
+      <canvas id="cv-heat" height="230"></canvas>
+    </div>
+    <div class="card" id="c-chute">
+      <h2>Parachute descent</h2>
+      <div class="what">Mk1 capsule + Canopy chute dropped from 5 km: descent speed over altitude.</div>
+      <canvas id="cv-chute" height="200"></canvas>
+      <div class="checks" id="ck"></div>
+    </div>
+  </div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { FlightSim } from '../src/physics/flight.js';
+import { buildTestRocket, buildCapsule } from '../src/physics/craftkit.js';
+import { rotationAngle } from '../src/physics/universe.js';
+import { surfaceHeight } from '../src/world/terrain.js';
+import { BODIES, LAUNCH_SITE, latLonToDir } from '../src/data/bodies.js';
+import { bus } from '../src/core/events.js';
+
+const css = getComputedStyle(document.querySelector('.viz-root'));
+const C = (n) => css.getPropertyValue(n).trim();
+const S1 = C('--series-1'), S2 = C('--series-2'), S3 = C('--series-3');
+const Y = new THREE.Vector3(0, 1, 0);
+const checks = [];
+
+// ─────────────── simulations ───────────────
+function runAscent() {
+  const game = { ut: 0 };
+  const sim = new FlightSim(game);
+  const v = sim.launch(buildTestRocket('Recorder Rocket'));
+  const events = [];
+  const off = bus.on('vessel:staged', (e) => { if (e.vessel === v) events.push({ ut: game.ut, stage: e.stage }); });
+  v.setControl('sas', true); v.setControl('throttle', 1);
+  const dir = new THREE.Vector3(); v.sasDirection = dir; v.setControl('sasMode', 'direction');
+  sim.stage();
+  const mu = BODIES.verda.mu, R = BODIES.verda.radius;
+  const start = v.pos.clone().normalize();
+  const pts = [];
+  let phase = 'ascent', maxQ = 0, maxG = 0;
+  const dv0 = v._computeStageStats(0, 9.81).totalDeltaV;
+  for (let i = 0; i < 50 * 900 && phase !== 'done'; i++) {
+    const t = v.telemetry, alt = t.altitude;
+    const act = v.lists.engines.filter(e => e.engine.active);
+    if (act.length && act.some(e => e.engine.flameout) && v.currentStage > 2) sim.stage();
+    if (phase === 'ascent') {
+      const pitch = alt < 800 ? 90 : Math.max(2, 90 * (1 - Math.pow((alt - 800) / 60000, 0.5)));
+      const pr = pitch * Math.PI / 180;
+      dir.copy(t.east).multiplyScalar(Math.cos(pr)).addScaledVector(t.up, Math.sin(pr));
+      if (t.apoapsis > 80000) { v.setControl('throttle', 0); phase = 'coast'; events.push({ ut: game.ut, label: 'MECO' }); }
+    } else {
+      if (alt < 60000) dir.copy(t.surfacePrograde);
+      else dir.copy(t.prograde).addScaledVector(t.up, -t.prograde.dot(t.up)).normalize();
+      const rA = R + t.apoapsis, r = R + alt, a = 1 / (2 / r - t.orbitalSpeed ** 2 / mu);
+      const dv = Math.sqrt(mu / rA) - Math.sqrt(Math.max(0, mu * (2 / rA - 1 / a)));
+      const F = act.reduce((s, e) => s + e.def.modules.engine.thrustVac * 1000, 0) || 1;
+      if (phase === 'coast') {
+        v.setControl('throttle', t.apoapsis < 79000 ? 0.25 : 0);
+        if (alt > 70000 && t.timeToAp < dv * v.mass / F / 2 + 1) { phase = 'circ'; v.setControl('throttle', 1); events.push({ ut: game.ut, label: 'Circularize' }); }
+      } else {
+        if (t.verticalSpeed < -5) dir.addScaledVector(t.up, Math.min(0.3, -t.verticalSpeed / 200)).normalize();
+        if (t.periapsis > 71000) { v.setControl('throttle', 0); phase = 'done'; }
+      }
+    }
+    sim.update(0.02);
+    maxQ = Math.max(maxQ, v.telemetry.dynamicPressure); maxG = Math.max(maxG, v.telemetry.gForce);
+    if (i % 10 === 0) {
+      // downrange along the surface (body-fixed), altitude
+      const th0 = rotationAngle('verda', 0), th = rotationAngle('verda', game.ut);
+      const p = v.pos.clone().applyAxisAngle(Y, -(th - th0)).normalize();
+      pts.push({ x: Math.acos(Math.min(1, p.dot(start))) * R / 1000, y: v.telemetry.altitude / 1000, stage: v.currentStage,
+        ut: game.ut, v: v.telemetry.surfaceSpeed, q: v.telemetry.dynamicPressure });
+    }
+  }
+  off();
+  const t = v.telemetry;
+  return { pts, events, phase, ap: t.apoapsis, pe: t.periapsis, ut: game.ut, maxQ, maxG,
+    dvUsed: dv0 - v._computeStageStats(0, 9.81).totalDeltaV, situation: v.situation };
+}
+
+function runReentry(shield, peAlt, apR) {
+  const sim = new FlightSim({ ut: 0 });
+  const v = sim.launch(buildCapsule({ heatShield: shield }));
+  const mu = BODIES.verda.mu, R = BODIES.verda.radius, r0 = R + 72000;
+  const a = (R + peAlt + apR) / 2, e = (apR - R - peAlt) / (apR + R + peAlt);
+  const vv = Math.sqrt(mu * (2 / r0 - 1 / a)), h = Math.sqrt(mu * a * (1 - e * e));
+  const cg = Math.min(1, h / (r0 * vv)), sg = Math.sqrt(1 - cg * cg);
+  v.unpin(); v.launched = true; v.situation = 'FLYING'; v._contactTimer = 99;
+  v.pos.set(r0, 0, 0); v.vel.set(-vv * sg, 0, -vv * cg); v.angVel.set(0, 0, 0);
+  v.rot.setFromUnitVectors(Y, v.vel.clone().normalize().negate());
+  v.setControl('sas', true); v.setControl('sasMode', 'retrograde');
+  sim.stage();
+  const pts = [];
+  let burnt = null;
+  const off = bus.on('part:destroyed', (p) => { if (p.vessel === v && !burnt) burnt = { ut: sim.game.ut, part: p.part.def.name }; });
+  for (let i = 0; i < 50 * 700; i++) {
+    sim.update(0.02);
+    let hr = 0;
+    for (const p of v.parts) hr = Math.max(hr, p.temp / p.def.maxTemp);
+    if (burnt && !v.parts.some(p => p.id === 'pod_mk1')) hr = 1;
+    if (i % 25 === 0) pts.push({ x: sim.game.ut, y: hr, alt: v.telemetry.altitude, spd: v.telemetry.surfaceSpeed });
+    if (v.destroyed || burnt || v.telemetry.altitude < 5000) break;
+  }
+  off();
+  return { pts, burnt, entry: vv };
+}
+
+function runChute() {
+  const sim = new FlightSim({ ut: 0 });
+  const v = sim.launch(buildCapsule());
+  const b = BODIES.verda;
+  const d = latLonToDir(LAUNCH_SITE.lat, LAUNCH_SITE.lon, new THREE.Vector3());
+  const hgt = surfaceHeight('verda', d.x, d.y, d.z), th = rotationAngle('verda', 0);
+  const f = d.multiplyScalar(b.radius + hgt + 5000);
+  v.unpin(); v.launched = true; v.situation = 'FLYING'; v._contactTimer = 99;
+  v.pos.set(f.x * Math.cos(th) + f.z * Math.sin(th), f.y, -f.x * Math.sin(th) + f.z * Math.cos(th));
+  const om = 2 * Math.PI / b.rotationPeriod;
+  v.vel.set(om * v.pos.z, 0, -om * v.pos.x); v.rot.setFromUnitVectors(Y, v.pos.clone().normalize()); v.angVel.set(0, om, 0);
+  sim.stage();
+  const pts = [], marks = [];
+  let touch = 0, lastState = v.lists.chutes[0].chute.state;
+  for (let i = 0; i < 50 * 400; i++) {
+    sim.update(0.02);
+    const t = v.telemetry;
+    const st = v.lists.chutes[0].chute.state;
+    if (st !== lastState) { if (st === 'semi' || st === 'deployed') marks.push({ alt: t.radarAltitude, state: st }); lastState = st; }
+    if (i % 10 === 0 && t.radarAltitude > 0) pts.push({ x: t.radarAltitude, y: -t.verticalSpeed });
+    if (t.radarAltitude > 0 && t.radarAltitude < 3) touch = -t.verticalSpeed;
+    if (v.situation === 'LANDED' || v.situation === 'SPLASHED') break;
+  }
+  return { pts, marks, touch, situation: v.situation, intact: v.parts.length === 2 };
+}
+
+// ─────────────── tiny chart kit (single y-axis, thin lines, crosshair + tooltip) ───────────────
+function setupCanvas(cv) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = cv.clientWidth, h = cv.height;
+  cv.width = w * dpr; cv.height = h * dpr; cv.style.height = h + 'px';
+  const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  return { g, w, h };
+}
+function niceTicks(lo, hi, n = 5) {
+  if (lo > hi) [lo, hi] = [hi, lo];
+  const span = hi - lo, step0 = span / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= n) || mag * 10;
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+function chart(cv, { series, xLabel, yLabel, xMax, yMax, xMin = 0, yMin = 0, fmtX, fmtY, annotate, tip }) {
+  const { g, w, h } = setupCanvas(cv);
+  const L = 46, Rm = 14, T = 10, B = 30;
+  const X = (x) => L + (x - xMin) / (xMax - xMin) * (w - L - Rm);
+  const Yp = (y) => T + (1 - (y - yMin) / (yMax - yMin)) * (h - T - B);
+  const draw = (hoverX) => {
+    g.clearRect(0, 0, w, h);
+    g.font = '11px JetBrains Mono, monospace'; g.lineWidth = 1;
+    for (const t of niceTicks(yMin, yMax)) {
+      g.strokeStyle = C('--grid'); g.beginPath(); g.moveTo(L, Yp(t)); g.lineTo(w - Rm, Yp(t)); g.stroke();
+      g.fillStyle = C('--text-muted'); g.textAlign = 'right'; g.fillText(fmtY(t), L - 6, Yp(t) + 4);
+    }
+    for (const t of niceTicks(xMin, xMax, 7)) {
+      g.fillStyle = C('--text-muted'); g.textAlign = 'center'; g.fillText(fmtX(t), X(t), h - B + 16);
+    }
+    g.strokeStyle = C('--axis'); g.beginPath(); g.moveTo(L, T); g.lineTo(L, h - B); g.lineTo(w - Rm, h - B); g.stroke();
+    g.fillStyle = C('--text-secondary'); g.textAlign = 'right'; g.fillText(xLabel, w - Rm, h - 2);
+    g.save(); g.translate(11, T + 2); g.rotate(-Math.PI / 2); g.textAlign = 'right'; g.fillText(yLabel, 0, 0); g.restore();
+    annotate?.(g, X, Yp, w, h);
+    for (const s of series) {
+      g.strokeStyle = s.color; g.lineWidth = 2; g.lineJoin = 'round'; g.lineCap = 'round';
+      g.beginPath();
+      s.pts.forEach((p, i) => (i ? g.lineTo(X(p.x), Yp(p.y)) : g.moveTo(X(p.x), Yp(p.y))));
+      g.stroke();
+      if (s.label) {
+        const last = s.pts[s.pts.length - 1];
+        g.fillStyle = C('--text-primary'); g.textAlign = s.labelAlign || 'left'; g.font = '600 12px Rajdhani, sans-serif';
+        g.fillText(s.label, X(last.x) + (s.labelDx ?? 6), Yp(last.y) + (s.labelDy ?? 4));
+        g.font = '11px JetBrains Mono, monospace';
+      }
+    }
+    if (hoverX != null) {
+      g.strokeStyle = C('--axis'); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(hoverX, T); g.lineTo(hoverX, h - B); g.stroke(); g.setLineDash([]);
+    }
+  };
+  draw(null);
+  const card = cv.closest('.card');
+  let tipEl = card.querySelector('.tip');
+  if (!tipEl) { tipEl = document.createElement('div'); tipEl.className = 'tip'; card.appendChild(tipEl); }
+  cv.addEventListener('mousemove', (ev) => {
+    const r = cv.getBoundingClientRect(), mx = ev.clientX - r.left;
+    if (mx < L || mx > w - Rm) { tipEl.style.display = 'none'; draw(null); return; }
+    const xv = xMin + (mx - L) / (w - L - Rm) * (xMax - xMin);
+    const lines = [];
+    for (const s of series) {
+      let best = null;
+      for (const p of s.pts) if (!best || Math.abs(p.x - xv) < Math.abs(best.x - xv)) best = p;
+      if (best && Math.abs(X(best.x) - mx) < 30) lines.push(tip(s, best));
+    }
+    draw(mx);
+    if (!lines.length) { tipEl.style.display = 'none'; return; }
+    tipEl.innerHTML = lines.join('<br>'); tipEl.style.display = 'block';
+    tipEl.style.left = Math.min(r.width - 200, mx + cv.offsetLeft + 12) + 'px'; tipEl.style.top = (cv.offsetTop + 10) + 'px';
+  });
+  cv.addEventListener('mouseleave', () => { tipEl.style.display = 'none'; draw(null); });
+}
+const legend = (el, items) => { el.innerHTML = items.map(([c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join(''); };
+
+// ─────────────── run & render ───────────────
+const t0 = performance.now();
+const asc = runAscent();
+const tAsc = performance.now() - t0;
+const leo = runReentry(true, 30000, BODIES.verda.radius + 90000);
+const lune = runReentry(false, 15000, 12000e3);
+const chute = runChute();
+
+// ascent
+const stageColor = { 4: S1, 3: S2, 2: S3 };
+const stageName = { 4: 'Stage 1 · Swivel + boosters', 3: 'Stage 2 · Swivel', 2: 'Stage 3 · Terrier' };
+const segs = [];
+for (const p of asc.pts) {
+  const last = segs[segs.length - 1];
+  if (!last || last.stage !== p.stage) { const s = { stage: p.stage, color: stageColor[p.stage] || S3, pts: last ? [last.pts[last.pts.length - 1]] : [] }; segs.push(s); }
+  segs[segs.length - 1].pts.push(p);
+}
+legend(document.getElementById('lg-ascent'), [4, 3, 2].map(s => [stageColor[s], stageName[s]]));
+const xMaxA = Math.ceil(Math.max(...asc.pts.map(p => p.x)) / 50) * 50;
+chart(document.getElementById('cv-ascent'), {
+  series: segs.map(s => ({ ...s, label: null })), xLabel: 'downrange (km)', yLabel: 'altitude (km)', xMax: xMaxA, yMax: 100,
+  fmtX: (x) => x.toFixed(0), fmtY: (y) => y.toFixed(0),
+  tip: (s, p) => `T+${p.ut.toFixed(0)}s  ${p.y.toFixed(1)} km  ${p.v.toFixed(0)} m/s  q ${p.q.toFixed(1)} kPa`,
+  annotate: (g, X, Yp, w) => {
+    g.strokeStyle = C('--text-muted'); g.setLineDash([5, 5]); g.beginPath(); g.moveTo(X(0), Yp(70)); g.lineTo(w - 14, Yp(70)); g.stroke(); g.setLineDash([]);
+    g.fillStyle = C('--text-muted'); g.textAlign = 'left'; g.fillText('edge of atmosphere · 70 km', X(0) + 6, Yp(70) - 6);
+    for (const e of asc.events) {
+      const p = asc.pts.reduce((a, b) => (Math.abs(b.ut - e.ut) < Math.abs(a.ut - e.ut) ? b : a));
+      if (e.stage === 4 && !e.label) { /* liftoff marker at the pad */ }
+      g.fillStyle = C('--surface-1'); g.beginPath(); g.arc(X(p.x), Yp(p.y), 5, 0, 7); g.fill();
+      g.strokeStyle = C('--text-primary'); g.lineWidth = 2; g.beginPath(); g.arc(X(p.x), Yp(p.y), 4, 0, 7); g.stroke(); g.lineWidth = 1;
+      const label = e.label || (e.stage === 4 ? 'Liftoff' : e.stage === 3 ? 'Boosters away' : e.stage === 2 ? 'Core away' : `Stage ${e.stage}`);
+      // hand-placed so neighbouring events never collide
+      const place = { Liftoff: ['left', 10, -4], 'Boosters away': ['left', 10, -6], MECO: ['left', 10, 14],
+        Circularize: ['right', -10, -10], 'Core away': ['left', 10, 16] }[label] || ['left', 8, 14];
+      g.fillStyle = C('--text-secondary'); g.textAlign = place[0]; g.fillText(label, X(p.x) + place[1], Yp(p.y) + place[2]);
+    }
+  },
+});
+const stat = (k, v, cls = '') => `<div class="stat"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`;
+document.getElementById('st-ascent').innerHTML = [
+  stat('Result', asc.situation, asc.situation === 'ORBITING' ? 'pass' : 'fail'),
+  stat('Apoapsis', (asc.ap / 1000).toFixed(1) + ' km'), stat('Periapsis', (asc.pe / 1000).toFixed(1) + ' km'),
+  stat('ΔV used', asc.dvUsed.toFixed(0) + ' m/s'), stat('Max Q', asc.maxQ.toFixed(1) + ' kPa'),
+  stat('Sim cost', `${(tAsc / (asc.ut / 0.02) * 1000).toFixed(0)} µs/step`),
+].join('');
+
+// heat
+legend(document.getElementById('lg-heat'), [[S1, 'Shielded capsule · LEO return'], [S2, `No shield · Lune return (${(lune.entry / 1000).toFixed(2)} km/s)`]]);
+const xMaxH = Math.ceil(Math.max(...leo.pts.map(p => p.x), ...lune.pts.map(p => p.x)) / 50) * 50;
+chart(document.getElementById('cv-heat'), {
+  series: [
+    { color: S1, pts: leo.pts, label: 'shield holds', labelDx: -4, labelDy: -8, labelAlign: 'right' },
+    { color: S2, pts: lune.pts, label: lune.burnt ? 'pod burns up' : 'survived', labelDx: 8 },
+  ],
+  xLabel: 'time (s)', yLabel: 'heat ratio', xMax: xMaxH, yMax: 1.1,
+  fmtX: (x) => x.toFixed(0), fmtY: (y) => y.toFixed(1),
+  tip: (s, p) => `${s === undefined ? '' : ''}T+${p.x.toFixed(0)}s  ${(p.y * 100).toFixed(0)}%  ${(p.alt / 1000).toFixed(1)} km  ${p.spd.toFixed(0)} m/s`,
+  annotate: (g, X, Yp, w) => {
+    g.strokeStyle = C('--tsp-bad'); g.globalAlpha = 0.6; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(X(0), Yp(1)); g.lineTo(w - 14, Yp(1)); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    g.fillStyle = C('--text-secondary'); g.textAlign = 'left'; g.fillText('max temperature', X(0) + 6, Yp(1) - 6);
+  },
+});
+
+// chute
+const xMaxC = 5000;
+chart(document.getElementById('cv-chute'), {
+  series: [{ color: S1, pts: chute.pts }],
+  xLabel: 'altitude above ground (m)', yLabel: 'descent speed (m/s)', xMin: xMaxC, xMax: 0, yMax: 60,
+  fmtX: (x) => x.toFixed(0), fmtY: (y) => y.toFixed(0),
+  tip: (s, p) => `${p.x.toFixed(0)} m  ${p.y.toFixed(1)} m/s`,
+  annotate: (g, X, Yp) => {
+    for (const m of chute.marks) {
+      const p = chute.pts.reduce((a, b) => (Math.abs(b.x - m.alt) < Math.abs(a.x - m.alt) ? b : a));
+      g.strokeStyle = C('--text-primary'); g.lineWidth = 2; g.beginPath(); g.arc(X(p.x), Yp(p.y), 4, 0, 7); g.stroke(); g.lineWidth = 1;
+      g.fillStyle = C('--text-secondary'); g.textAlign = 'left';
+      g.textAlign = m.state === 'semi' ? 'left' : 'right';
+      g.fillText(m.state === 'semi' ? 'streamer opens' : 'full canopy', X(p.x) + (m.state === 'semi' ? 10 : -8), Yp(p.y) + (m.state === 'semi' ? -8 : -14));
+    }
+    const lp = chute.pts[chute.pts.length - 1];
+    g.fillStyle = C('--text-primary'); g.textAlign = 'right'; g.font = '600 12px Rajdhani, sans-serif';
+    g.fillText(`touchdown ${chute.touch.toFixed(1)} m/s`, X(lp.x) - 4, Yp(lp.y) - 12);
+    g.font = '11px JetBrains Mono, monospace';
+  },
+});
+
+const ok = (c, t) => `<div class="${c ? 'pass' : 'fail'}">${c ? '✔' : '✘'} ${t}</div>`;
+document.getElementById('ck').innerHTML = [
+  ok(asc.situation === 'ORBITING' && asc.pe > 70000, `ascent reaches orbit (Pe ${(asc.pe / 1000).toFixed(1)} km)`),
+  ok(!leo.burnt, 'shielded capsule survives a LEO return'),
+  ok(!!lune.burnt, `unshielded pod burns up returning from Lune${lune.burnt ? ` (${lune.burnt.part})` : ''}`),
+  ok(chute.touch > 6 && chute.touch < 7.2 && chute.intact, `chute touchdown ${chute.touch.toFixed(2)} m/s, ${chute.situation}`),
+].join('');
+console.log('physics recorder', JSON.stringify({ orbit: asc.situation, ap: asc.ap, pe: asc.pe, dvUsed: asc.dvUsed, leoBurnt: !!leo.burnt,
+  luneBurnt: !!lune.burnt, chute: chute.touch, window: typeof window.TSP?.physics?.orbit }));
+window.__testReady = true;
+</script>
+</body>
+</html>
