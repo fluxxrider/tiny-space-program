@@ -3,7 +3,10 @@
 //
 //   node films/ai-2027/tools/encode-share.mjs [--segments films/ai-2027/out/segments] [--prefix seg_1920x1080_24fps_]
 //        [--audio films/ai-2027/out/score.wav] [--out films/ai-2027/dist/ai-2027-film.mp4] [--target-mb 95]
-//        [--audio-kbps 160] [--preset slower] [--threads 4]
+//        [--audio-kbps 160] [--preset slower] [--threads 4] [--scale 1280:720] [--denoise]
+//
+// --scale and --denoise make a small copy (e.g. --scale 1280:720 --denoise --target-mb 30 --audio-kbps 96): at a few
+// hundred kb/s the film grain only turns into blocks, so it is smoothed away before encoding.
 //
 // The segments must tile the whole film with no gaps (frame 0 to DURATION * fps); the script refuses otherwise.
 import fs from 'node:fs';
@@ -23,6 +26,8 @@ const targetMB = Number(opt('target-mb', 95));
 const audioKbps = Number(opt('audio-kbps', 160));
 const preset = opt('preset', 'slower');
 const threads = opt('threads', '4');
+const scale = opt('scale', null);
+const denoise = args.includes('--denoise');
 const FPS = 24;
 const ffmpeg = ['/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'].find(f => fs.existsSync(f)) || 'ffmpeg';
 
@@ -47,7 +52,8 @@ const videoKbps = Math.floor((targetMB * 1e6 * 8 / dur / 1000) * 0.994 - audioKb
 console.log(`${segs.length} segments, ${total} frames (${dur.toFixed(2)} s) -> ${path.relative(ROOT, out)}`);
 console.log(`target ${targetMB} MB: video ${videoKbps} kb/s + AAC ${audioKbps} kb/s, x264 ${preset} 2-pass`);
 
-const vf = `settb=1/${FPS},setpts=N,format=yuv420p`;   // exact timestamps: frame N at N/24 s
+const vf = [`settb=1/${FPS}`, 'setpts=N',          // exact timestamps: frame N at N/24 s
+  ...(scale ? [`scale=${scale}:flags=lanczos`] : []), ...(denoise ? ['hqdn3d=2:1.5:3:2.5'] : []), 'format=yuv420p'].join(',');
 const x264 = ['-c:v', 'libx264', '-preset', preset, '-tune', 'film', '-profile:v', 'high', '-level:v', '4.1',
   '-b:v', `${videoKbps}k`, '-maxrate', `${videoKbps * 4}k`, '-bufsize', `${videoKbps * 8}k`,
   '-g', String(FPS * 5), '-x264-params', 'aq-mode=3', '-pix_fmt', 'yuv420p', '-threads', threads,
