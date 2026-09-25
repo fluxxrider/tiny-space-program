@@ -134,7 +134,7 @@ export default {
       const k = lt < 21.2 ? smooth((lt - 16.2) / 1.2) : smooth((lt - 21.2 - (stage - 1) * 1.3) / 0.6);
       for (let s = 0; s <= stage; s++) {
         const a = s === stage ? k : 1 - smooth((lt - 21.2 - (s) * 1.3) / 0.6) * 0.85;
-        safer[s].draw(cam, { model: m4.mul(m4.rotY(lt * (0.2 + s * 0.05)), m4.rotX(0.3 * s)), time: t, alpha: sa * a * 1.2 / Math.sqrt([1, 2.4, 4, 7.2][s]), twinkle: 0.3, size: 1 });
+        safer[s].draw(cam, { model: m4.mul(m4.rotY(lt * (0.2 + s * 0.05)), m4.rotX(0.3 * s)), time: t, alpha: sa * a * 1.2 / Math.sqrt([1, 2.6, 5, 12][s]), twinkle: 0.3, size: 1 });
       }
       const la = win(lt, 16.6, 25.4, 0.5, 0.5);
       if (la > 0) {
@@ -143,7 +143,10 @@ export default {
         setFont(o, { weight: 300, size: 46, family: FONT.wide, stretch: 'expanded' });
         o.fillStyle = COLORS.gold; o.textBaseline = 'middle';
         const w = measureTracked(o, name, 10);
+        o.shadowColor = 'rgba(0,0,0,0.9)'; o.shadowBlur = 22;
         drawTracked(o, name, 960 - w / 2, 230, 10);
+        drawTracked(o, name, 960 - w / 2, 230, 10);
+        o.shadowBlur = 0;
         // transparent thoughts (Safer-1)
         const ta = win(lt, 17.0, 21.4, 0.5, 0.5);
         if (ta > 0) {
@@ -166,7 +169,7 @@ export default {
       const cam = council.draw(t, { seats, lamp: ta, az: 2.0 + lt * 0.02, el: 0.36, dist: 12.5, fov: 36, lookY: 1.6, center: [0.5, 0.35, 0.12] });
       safer[3].draw(cam, { model: m4.mul(m4.translate(0, 1.7, 0), m4.mul(m4.rotY(lt * 0.3), m4.scale(0.6))), time: t, alpha: ta * 0.45, twinkle: 0.3, size: 0.9 });
       o.save(); R.ga(ta * smooth((lt - 26) / 0.6));
-      label(o, 'SUPERINTELLIGENCE  ·  OVERSEEN BY THE COMMITTEE', 960, 230, { size: 14, color: COLORS.gold, tracking: 0.3, weight: 600 });
+      label(o, 'SUPERINTELLIGENCE  ·  OVERSEEN BY THE COMMITTEE', 960, 230, { size: 14, color: COLORS.gold, tracking: 0.3, weight: 600, bg: 'rgba(3,5,9,0.6)' });
       o.restore();
     }
     // 8-9. treaty, then abundance
@@ -183,7 +186,7 @@ export default {
       globe.drawArc(cam, arc, { progress: tp, alpha: ga * (1 - smooth((lt - 35.5) / 1)), time: t, pulse: 1.5 });
       o.save();
       const la = win(lt, 31.5, 35.6, 0.4, 0.5);
-      if (la > 0) { R.ga(la); label(o, 'TREATY  ·  WASHINGTON — BEIJING', 960, 250, { size: 14, color: COLORS.gold, tracking: 0.35, weight: 600 }); }
+      if (la > 0) { R.ga(la); label(o, 'TREATY  ·  WASHINGTON — BEIJING', 960, 250, { size: 14, color: COLORS.gold, tracking: 0.35, weight: 600, bg: 'rgba(3,5,9,0.66)' }); }
       const ia2 = win(lt, 35.2, 40.2, 0.6, 0.5);
       if (ia2 > 0) {
         const icons = [['dna', 'NEW CURES'], ['bolt', 'CHEAP ENERGY'], ['robot', 'ROBOTS'], ['factory', 'ABUNDANCE']];

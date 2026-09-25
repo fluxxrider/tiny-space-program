@@ -1,6 +1,7 @@
 // Captions, chapter cards and the HUD (date + AI R&D progress multiplier).
 import { CUES, MULTIPLIER_KEYS, MULTIPLIER_NOTES } from './script.js';
 import { SEC, SECTIONS, BAR, sectionAt } from './structure.js';
+import { LEAK } from './timing.js';
 import { clamp, smooth, ease, lerp, win } from './engine/math.js';
 import {
   W, H, COLORS, FONT, setFont, drawRich, drawTrackIn, drawStamp, measureTracked, drawTracked, frameBox, decodeText,
@@ -153,7 +154,7 @@ function drawChapter(ctx, c, t, fb) {
 
 // ---------------------------------------------------------------- HUD
 const HUD_START = SEC.agents.start;
-const HUD_END = SEC.leak.end - 0.6;
+const HUD_END = SEC.leak.start + 7.3 * BAR + 0.5;   // gone before the committee's question
 
 export function multiplierAt(t) {
   const keys = MULTIPLIER_KEYS.map(([id, b, v]) => ({ t: SEC[id].start + b * BAR, v }));
@@ -176,6 +177,7 @@ export function drawGauge(ctx, t, { x, y, scale = 1, align = 'right', alpha = 1,
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10 * scale;
   const s = scale;
   const bw = 300 * s;
   const x0 = align === 'right' ? x - bw : align === 'center' ? x - bw / 2 : x;
@@ -200,7 +202,7 @@ export function drawGauge(ctx, t, { x, y, scale = 1, align = 'right', alpha = 1,
   ctx.fillText(num, vx, y + 58 * s);
   setFont(ctx, { weight: 200, size: 44 * s, family: FONT.sans });
   ctx.fillText('×', vx + nw + 4 * s, y + 58 * s);
-  ctx.shadowBlur = 0;
+  ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10 * s;
   // log bar 1..100
   const by = y + 80 * s;
   const frac = clamp(Math.log(m.value) / Math.log(100));
@@ -241,7 +243,9 @@ export function drawHUD(ctx, t, letterbox) {
   const fb = frameBox(letterbox);
   const sec = sectionAt(t);
   // HUD fades in with the first chapter and out after the leak
-  const a = win(t, HUD_START + 1.2, HUD_END, 1.0, 0.8);
+  // steps aside while the newspaper front page fills the frame
+  const lk = t - SEC.leak.start;
+  const a = win(t, HUD_START + 1.2, HUD_END, 1.0, 0.8) * (1 - win(lk, LEAK.front - 0.2, LEAK.outrage - 0.2, 0.3, 0.6));
   // multiplier: big reveal during the premise, then docks to the corner
   const p0 = SEC.premise.start;
   const reveal = win(t, p0 + 4.0 * BAR, p0 + 6 * BAR + 0.2, 0.6, 0.5);
@@ -250,6 +254,7 @@ export function drawHUD(ctx, t, letterbox) {
   }
   if (a <= 0) return;
   ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10;   // legible over bright scenes
   // date (top-left)
   const d = sec.date;
   if (d) {

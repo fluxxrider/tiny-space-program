@@ -148,7 +148,7 @@ export function pad(bus, t, dur, note, vel = 0.6, o = {}) {
     const drift = rr() * TAU, rate = 0.15 + rr() * 0.25;
     const vr = 4.8 + rr() * 0.8, vd = vib * (0.8 + rr() * 0.4);
     const fr = modFreq(n, f0, (tt) => d + 3 * Math.sin(tt * rate * TAU + drift) + vd * Math.min(1, tt / 0.6) * Math.sin(tt * vr * TAU + drift * 3));
-    const s = osc(type, n, fr, { phase: rr(), bl: 'polyblep' });
+    const s = osc(type, n, fr, { phase: rr() });
     const p = voices === 1 ? pan : pan + (v / (voices - 1) - 0.5) * 2 * width;
     const [gl, gr] = panGains(Math.max(-1, Math.min(1, p)));
     for (let i = 0; i < n; i++) { L[i] += s[i] * gl; Rr[i] += s[i] * gr; }
@@ -175,7 +175,7 @@ export function stacc(bus, t, note, vel = 0.7, { len = 0.14, pan = 0, cutoff = 3
   const rr = nextRand();
   const x = new Float32Array(n);
   for (let v = 0; v < 3; v++) {
-    const s = osc('saw', n, f0 * centsToRatio((v - 1) * 6), { phase: rr(), bl: 'polyblep' });
+    const s = osc('saw', n, f0 * centsToRatio((v - 1) * 6), { phase: rr() });
     for (let i = 0; i < n; i++) x[i] += s[i] / 3;
   }
   const bow = noise(n, rr, 'white');
@@ -233,7 +233,7 @@ export function choir(bus, t, dur, note, vel = 0.6, { vowel = 'a', voices = 5, a
       if (tt - lastT > 0.005) { jit = jit * 0.9 + (rr() - 0.5) * 1.6; lastT = tt; }
       return d + jit + vd * Math.min(1, tt / 0.8) * Math.sin(tt * vr * TAU + ph);
     });
-    const s = osc('pulse', n, fr, { pw: 0.18 + rr() * 0.1, phase: rr(), bl: 'polyblep' });
+    const s = osc('pulse', n, fr, { pw: 0.18 + rr() * 0.1, phase: rr() });
     const side = (v % 2 ? 1 : 0);
     for (let i = 0; i < n; i++) src[side][i] += s[i];
   }
@@ -264,9 +264,9 @@ export function arp(bus, t, note, vel = 0.6, { len = 0.14, cutoff = 900, env = 5
   const n = S(len + 0.15);
   const rr = nextRand();
   const x = new Float32Array(n);
-  const a = osc('saw', n, f0 * centsToRatio(-6), { phase: rr(), bl: 'polyblep' });
-  const b = osc('saw', n, f0 * centsToRatio(6), { phase: rr(), bl: 'polyblep' });
-  const c = osc('square', n, f0 / 2, { phase: rr(), bl: 'polyblep' });
+  const a = osc('saw', n, f0 * centsToRatio(-6), { phase: rr() });
+  const b = osc('saw', n, f0 * centsToRatio(6), { phase: rr() });
+  const c = osc('square', n, f0 / 2, { phase: rr() });
   for (let i = 0; i < n; i++) x[i] = (a[i] + b[i]) * 0.5 + c[i] * sub;
   const cut = new Float32Array(n);
   for (let i = 0; i < n; i++) cut[i] = cutoff * (1 + env * Math.exp(-i / (0.07 * SR)));
@@ -281,7 +281,7 @@ export function bass(bus, t, dur, note, vel = 0.7, { cutoff = 380, drive = 1.2 }
   const n = S(dur + 0.12);
   const rr = nextRand();
   const s = osc('sine', n, f0, { phase: 0 });
-  const w = osc('saw', n, f0, { phase: rr(), bl: 'polyblep' });
+  const w = osc('saw', n, f0, { phase: rr() });
   const x = new Float32Array(n);
   for (let i = 0; i < n; i++) x[i] = s[i] * 0.8 + w[i] * 0.35;
   new SVF('lp').process(x, cutoff, 0.9);
@@ -322,7 +322,7 @@ export function braam(bus, t, notes, vel = 1, { dur = 3.2, open = 2600, r = 1.2 
       const base = f0 * centsToRatio(d);
       const fr = new Float32Array(n);
       for (let i = 0; i < n; i++) fr[i] = base * bendC[i];
-      const s = osc('saw', n, fr, { phase: rr(), bl: 'polyblep' });
+      const s = osc('saw', n, fr, { phase: rr() });
       const [gl, gr] = panGains((v / 5 - 0.5) * 1.2);
       for (let i = 0; i < n; i++) { L[i] += s[i] * gl; R[i] += s[i] * gr; }
     }
@@ -404,7 +404,7 @@ export function hat(bus, t, vel = 0.5, { open = false, pan = 0.2 } = {}) {
   const x = new Float32Array(n);
   const ratios = [2, 3, 4.16, 5.43, 6.79, 8.21];
   for (const r of ratios) {
-    const s = osc('square', n, 40 * r * 8, { bl: 'polyblep', phase: 0.1 * r });
+    const s = osc('square', n, 40 * r * 8, { phase: 0.1 * r });
     for (let i = 0; i < n; i++) x[i] += s[i] / 6;
   }
   new Biquad('bandpass', 10000, 1.1).process(x);
@@ -543,7 +543,7 @@ export function riser(bus, t0, t1, vel = 0.6, { from = 250, to = 9000, tone = tr
   if (tone) {
     const fr = new Float32Array(n);
     for (let i = 0; i < n; i++) fr[i] = 110 * Math.pow(8, Math.pow(i / n, 1.4));
-    const s = osc('saw', n, fr, { bl: 'polyblep' });
+    const s = osc('saw', n, fr, {});
     new SVF('lp').process(s, 3000, 0.7);
     for (let i = 0; i < n; i++) { const v = s[i] * env[i] * 0.2; L[i] += v; R[i] += v; }
   }
@@ -593,7 +593,7 @@ export function alarm(bus, t, dur = 2, vel = 0.4) {
   const n = S(dur);
   const fr = new Float32Array(n);
   for (let i = 0; i < n; i++) fr[i] = (Math.floor(i / (0.25 * SR)) % 2) ? 659.25 : 880;
-  const x = osc('square', n, fr, { bl: 'polyblep' });
+  const x = osc('square', n, fr, {});
   new Biquad('lowpass', 2400, 0.7).process(x);
   const e = adsr(n, { a: 0.02, d: 0.1, s: 1, r: 0.2, gateLen: dur - 0.2 });
   for (let i = 0; i < n; i++) x[i] *= e[i];
@@ -605,7 +605,7 @@ export function tapeChirp(bus, t, dur = 1.2, vel = 0.5) {
   const rr = nextRand();
   const fr = new Float32Array(n);
   for (let i = 0; i < n; i++) { const k = i / n; fr[i] = 180 * Math.pow(30, k * k) * (1 + 0.03 * Math.sin(i / SR * 37 * TAU)); }
-  const s = osc('saw', n, fr, { bl: 'polyblep' });
+  const s = osc('saw', n, fr, {});
   const nz = noise(n, rr);
   new SVF('bp').process(nz, fr, 3);
   const x = new Float32Array(n);
@@ -649,7 +649,7 @@ export function powerDown(bus, t, dur = 2, vel = 0.6, { from = 440 } = {}) {
   const n = S(dur);
   const fr = new Float32Array(n);
   for (let i = 0; i < n; i++) { const k = i / n; fr[i] = 18 + (from - 18) * Math.pow(1 - k, 2.5); }
-  const s = osc('saw', n, fr, { bl: 'polyblep' });
+  const s = osc('saw', n, fr, {});
   const cut = new Float32Array(n);
   for (let i = 0; i < n; i++) cut[i] = 60 + 3000 * Math.pow(1 - i / n, 2);
   new SVF('lp').process(s, cut, 1.2);

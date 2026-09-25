@@ -245,6 +245,12 @@ test('utils: rng / gauss / pan / dB / MIDI / note names', () => {
     threw = true;
   }
   assert(threw, 'invalid note throws');
+  near(dsp.centsToRatio(1200), 2, 1e-12, 'cents');
+  const bad = new Float32Array([0, NaN, 1, Infinity, -Infinity, 0.5]);
+  assert(dsp.sanitize(bad) === 3 && allFinite(bad) && bad[2] === 1, 'sanitize');
+  const f = new Float32Array(1000).fill(1);
+  dsp.fade(f, 100 / SR, 200 / SR);
+  assert(f[0] === 0 && f[999] < 1e-3 && f[500] === 1 && f[50] > 0.4 && f[50] < 0.6, 'fade');
 });
 
 test('StereoBuffer: add* clip safely at both ends; peak / rms', () => {
@@ -801,6 +807,15 @@ test('softClip: tanh, small-signal unity gain, bounded; oversampling reduces ali
     for (let k = 1; k < P.length; k++) if (k % m !== 0) a += P[k];
     return 10 * Math.log10(a / P[m]);
   };
+  // resampler round trip on a band-limited signal (zero-phase, ~transparent below 18 kHz)
+  const src = dsp.noise(16384, 3);
+  new dsp.Biquad('lowpass', 15000, 0.7).process(src);
+  new dsp.Biquad('lowpass', 15000, 0.7).process(src);
+  const rt = dsp.downsample(dsp.upsample(src, 4), 4);
+  let e = 0;
+  for (let i = 512; i < 16384 - 512; i++) e = Math.max(e, Math.abs(rt[i] - src[i]));
+  info(`upsample×4 → downsample×4 round-trip max error ${e.toExponential(2)} (${f2(db(e / peakAbs(src)), 1)} dB re peak)`);
+  assert(e < 3e-3 * peakAbs(src), 'resampler round trip');
   const a1 = alias(1);
   const a4 = alias(4);
   info(`tanh drive 8 on 5 kHz: alias energy ${f2(a1, 1)} dB (1×) → ${f2(a4, 1)} dB (4× oversampled)`);

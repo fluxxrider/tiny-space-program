@@ -119,7 +119,7 @@ let lu = loudness(mixL, mixR);
 log(`pre-limit loudness ${lu.integrated.toFixed(2)} LUFS, peak ${lu.samplePeakDb.toFixed(2)} dBFS`);
 const gain = dbToGain(TARGET_LUFS - lu.integrated + 0.6);
 for (let i = 0; i < LEN; i++) { mixL[i] *= gain; mixR[i] *= gain; }
-limiter(mixL, mixR, { ceilingDb: -1.0, lookahead: 0.006, release: 0.15 });
+limiter(mixL, mixR, { ceilingDb: -1.5, lookahead: 0.006, release: 0.15 }); // -1.5 so ffmpeg's 4x true-peak meter reads <= -1 dBTP
 // gentle fades at the very edges
 const fi = Math.round(0.02 * SR), foN = Math.round(1.2 * SR);
 for (let i = 0; i < fi; i++) { mixL[i] *= i / fi; mixR[i] *= i / fi; }

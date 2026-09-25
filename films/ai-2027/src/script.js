@@ -118,10 +118,10 @@ const S = {
   ],
   leak: [
     { at: 0.0, dur: 1.4, style: 'chapter', date: 'OCTOBER 2027', text: 'Government Oversight' },
-    { at: 0.85, dur: 1.25, style: 'cap', text: 'A whistleblower leaks the warning to the press.' },
+    { at: 0.85, dur: 1.1, style: 'cap', text: 'A whistleblower leaks the warning to the press.' },
     { at: 4.1, dur: 1.3, style: 'cap', text: 'Outrage at home. *Fury abroad.*' },
     { at: 5.5, dur: 1.7, style: 'cap', text: 'A committee of company leaders and government officials must decide:' },
-    { at: 7.3, dur: 2.65, style: 'serif', pos: 'upper', text: 'Keep using Agent-4 and stay ahead of China — or slow down?' },
+    { at: 7.3, dur: 2.65, style: 'serif', pos: 'upper', text: 'Keep using Agent-4 and stay ahead of China —\nor\u00A0slow\u00A0down?' },
   ],
   fork: [
     { at: 0.15, dur: 1.2, style: 'serif', text: 'The authors wrote two endings.' },
@@ -176,7 +176,7 @@ const S = {
     { at: 9.75, dur: 2.2, style: 'serifBig', text: 'The real ending hasn’t been written yet.' },
   ],
   credits: [
-    { at: 2.3, dur: 3.6, style: 'creditBlock', text: 'Based on “AI 2027” by Daniel Kokotajlo, Scott Alexander, Thomas Larsen, Eli Lifland & Romeo Dean — AI Futures Project, 2025.|Read the full scenario at *ai-2027.com*|An unofficial explainer. Every image and every note of the score was generated in code.' },
+    { at: 2.3, dur: 3.6, style: 'creditBlock', text: 'Based on “AI 2027” by Daniel\u00A0Kokotajlo, Scott\u00A0Alexander, Thomas\u00A0Larsen, Eli\u00A0Lifland &\u00A0Romeo\u00A0Dean —\u00A0AI\u00A0Futures\u00A0Project,\u00A02025.|Read the full scenario at *ai-2027.com*|An unofficial explainer. Every image and every note of the score was generated in code.' },
   ],
 };
 

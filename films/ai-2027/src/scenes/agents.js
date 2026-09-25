@@ -16,8 +16,9 @@ const RETRY = 9.3, FAIL2 = 10.6;
 function bgWindows(R, o, lt) {
   // distant agents doing other chores, some failing
   const tasks = ['Sum this month’s expenses', 'Book a dentist appointment', 'Reply to Sam’s email', 'Find flights to Lisbon', 'Cancel my gym membership', 'Summarize this PDF'];
-  for (let i = 0; i < 6; i++) {
-    const x = [150, 1420, 260, 1500, 120, 1380][i], y = [230, 210, 560, 600, 830, 850][i];
+  // clear of the HUD corners (date top-left, multiplier top-right) and of the caption band
+  for (let i = 0; i < 4; i++) {
+    const x = [150, 1440, 190, 1470][i], y = [330, 350, 540, 570][i];
     const a = win(lt, 3.0 + i * 0.25, 13, 1.2, 0.8) * 0.4;
     if (a <= 0) continue;
     o.save();

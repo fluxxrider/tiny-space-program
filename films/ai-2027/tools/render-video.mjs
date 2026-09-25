@@ -310,6 +310,7 @@ function pageInstallHarness(cfg) {
     if (cfg.mode === 'raw') {
       if (gl) withDefaultReadFb(() => gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, raw));
       else raw.set(c2d.getImageData(0, 0, W, H).data);
+      check();                                 // a context lost mid-frame reads back black: fail the frame
       const body = new Blob([raw]);            // copies; a Blob body uploads ~30x faster than an ArrayBuffer body
       const t3 = now();
       const p = fetch(url, { method: 'POST', body }).then(async res => {
@@ -323,6 +324,7 @@ function pageInstallHarness(cfg) {
     }
     if (cfg.mode === 'jpeg' || cfg.mode === 'png') {
       const u = canvas.toDataURL('image/' + cfg.mode, cfg.quality);
+      check();
       r.sent = now(); r.capture = r.sent - t2; r.wait = 0;
       r.data = u.slice(u.indexOf(',') + 1);
       return r;
@@ -330,7 +332,7 @@ function pageInstallHarness(cfg) {
     r.sent = now(); r.capture = 0; r.wait = 0;       // screenshot: captured by node via CDP
     return r;
   }
-  async function flush() { while (inflight.length) await inflight.shift(); }
+  async function flush() { while (inflight.length) await inflight.shift(); check(); }
   async function still(t) {
     await renderAndSync(t);
     const u = canvas.toDataURL('image/png');
@@ -443,6 +445,11 @@ class Shard {
     const exe = this.ctx.chrome;
     const shell = /headless_shell|chrome-headless-shell/.test(exe);
     const t0 = nowMs();
+    // Rejects when the renderer crashes or the browser goes away, so an in-flight evaluate fails immediately
+    // (a crashed renderer never answers a pending Runtime.callFunctionOn; we would otherwise wait for the timeout).
+    let crashReject;
+    this.crash = new Promise((_, rej) => { crashReject = rej; });
+    this.crash.catch(() => {});
     this.browser = await puppeteer.launch({
       executablePath: exe, headless: shell ? 'shell' : true, pipe: true, args: chromeArgs(opt, this.w, this.h),
       ignoreDefaultArgs: shmIsBig() ? ['--disable-dev-shm-usage'] : [],
@@ -451,7 +458,7 @@ class Shard {
     });
     this.dead = false;
     const browser = this.browser;
-    browser.on('disconnected', () => { if (this.browser === browser) this.dead = true; });
+    browser.on('disconnected', () => { if (this.browser === browser) { this.dead = true; crashReject(new Error('browser disconnected')); } });
     const page = (await browser.pages())[0] || await browser.newPage();
     this.page = page;
     const L = this.label;
@@ -461,7 +468,7 @@ class Shard {
       pageError(L, 'console.error: ' + text);
     });
     page.on('pageerror', e => pageError(L, 'pageerror: ' + (e.stack || e.message || e)));
-    page.on('error', e => { pageError(L, 'page crashed: ' + (e.message || e)); this.dead = true; });
+    page.on('error', e => { pageError(L, 'page crashed: ' + (e.message || e)); this.dead = true; crashReject(new Error('page crashed (renderer process died)')); });
     page.on('requestfailed', r => { if (!r.url().includes('/__rv/')) pageError(L, `request failed: ${r.url()} ${r.failure()?.errorText || ''}`); });
     page.on('response', r => { if (r.status() >= 400 && !r.url().includes('/__rv/')) pageError(L, `HTTP ${r.status()}: ${r.url()}`); });
     const q = new URLSearchParams({ render: '1', w: this.w, h: this.h, fps: String(+this.ctx.fps.value.toFixed(6)) });
@@ -476,6 +483,7 @@ class Shard {
     if (this.ctx.opt.capture === 'screenshot') this.cdp = await page.createCDPSession();
     return this.info;
   }
+  evaluate(fn, ...args) { return Promise.race([this.page.evaluate(fn, ...args), this.crash]); }
   validate() {
     const i = this.info, L = this.label;
     if (i.width !== this.w || i.height !== this.h) throw new FatalError(`${L}: canvas is ${i.width}x${i.height}, expected ${this.w}x${this.h} (the page must honour ?w=&h=)`);
@@ -580,7 +588,7 @@ async function renderSegmentOnce(shard, seg, ctx, progress) {
       if (shard.dead) throw new Error('browser died');
       const g = seg.first + i, t = ctx.frameTime(g);
       const url = `/__rv/frame?k=${key}&g=${g}`;
-      const r = await withTimeout(shard.page.evaluate((t, url) => window.__rv.frame(t, url), t, url), opt.frameTimeout * 1000, `${shard.label}: frame ${g} (t=${t.toFixed(4)})`);
+      const r = await withTimeout(shard.evaluate((t, url) => window.__rv.frame(t, url), t, url), opt.frameTimeout * 1000, `${shard.label}: frame ${g} (t=${t.toFixed(4)})`);
       const tEnd = nowMs();
       r.total = tEnd - last; last = tEnd;
       if (opt.capture === 'raw') {
@@ -589,8 +597,8 @@ async function renderSegmentOnce(shard, seg, ctx, progress) {
       } else {
         let buf;
         if (opt.capture === 'screenshot') {
-          const shot = await withTimeout(shard.cdp.send('Page.captureScreenshot', { format: 'png', optimizeForSpeed: true, fromSurface: true, captureBeyondViewport: false,
-            clip: { x: 0, y: 0, width: ctx.w, height: ctx.h, scale: 1 } }), opt.frameTimeout * 1000, `${shard.label}: screenshot ${g}`);
+          const shot = await withTimeout(Promise.race([shard.crash, shard.cdp.send('Page.captureScreenshot', { format: 'png', optimizeForSpeed: true, fromSurface: true, captureBeyondViewport: false,
+            clip: { x: 0, y: 0, width: ctx.w, height: ctx.h, scale: 1 } })]), opt.frameTimeout * 1000, `${shard.label}: screenshot ${g}`);
           buf = Buffer.from(shot.data, 'base64');
           r.capture = nowMs() - r.sent;
         } else buf = Buffer.from(r.data, 'base64');
@@ -598,17 +606,21 @@ async function renderSegmentOnce(shard, seg, ctx, progress) {
         results.set(g, r);
         await withTimeout(sink.put(g, buf, nowMs()), opt.frameTimeout * 1000, `${shard.label}: encoder accepting frame ${g}`);
       }
-      if (opt.verbose) log(`[${shard.label}] frame ${g} t=${t.toFixed(4)} render ${r.render.toFixed(0)} capture ${r.capture.toFixed(0)} wait ${r.wait.toFixed(0)} total ${r.total.toFixed(0)} ms`);
+      if (opt.verbose) log(`${((tEnd - ctx.t0) / 1000).toFixed(2).padStart(8)}s [${shard.label}] frame ${g} t=${t.toFixed(4)} render ${r.render.toFixed(0)} (js ${r.js.toFixed(0)}) capture ${r.capture.toFixed(0)} wait ${r.wait.toFixed(0)} total ${r.total.toFixed(0)} ms`);
       progress.maybePrint();
     }
-    await withTimeout(shard.page.evaluate(() => window.__rv.flush()), opt.frameTimeout * 1000, `${shard.label}: flushing uploads`);
+    const f0 = nowMs();
+    await withTimeout(shard.evaluate(() => window.__rv.flush()), opt.frameTimeout * 1000, `${shard.label}: flushing uploads`);
     await withTimeout(sink.chain, opt.frameTimeout * 1000, `${shard.label}: encoder draining`);
     if (sink.error) throw sink.error;
     if (!sink.done) throw new Error(`segment ${seg.name}: only ${sink.next - seg.first}/${seg.count} frames arrived`);
+    const f1 = nowMs();
     await withTimeout(enc.finish(), 600000, `finishing ${seg.name}`);
+    const f2 = nowMs();
     const ps = await packetStats(partial, 0);
     if (ps.packets !== seg.count) throw new Error(`segment ${seg.name}: file has ${ps.packets} frames, expected ${seg.count}`);
     fs.renameSync(partial, seg.file);
+    if (opt.verbose) log(`${((nowMs() - ctx.t0) / 1000).toFixed(2).padStart(8)}s [${shard.label}] segment finalize: flush ${(f1 - f0).toFixed(0)} ms, encoder finish ${(f2 - f1).toFixed(0)} ms, verify ${(nowMs() - f2).toFixed(0)} ms`);
   } catch (e) {
     enc.kill();
     sink.fail(e);
@@ -721,10 +733,11 @@ async function renderVideo(opt, ctx) {
           if (ctx.aborting) return;
           if (e instanceof FatalError) throw e;
           consecutiveFailures++;
-          warn(`[${shard.label}] segment f${seg.first}+${seg.count} attempt ${attempt}/${opt.retries} failed: ${e.message}`);
+          const msg = String(e.message).split('\n').filter(l => !l.includes('pptr:')).join('\n');   // drop puppeteer's page-stack lines
+          warn(`[${shard.label}] segment f${seg.first}+${seg.count} attempt ${attempt}/${opt.retries} failed: ${msg}`);
           await shard.stop();         // fresh browser for the next attempt
           if (attempt >= opt.retries || consecutiveFailures >= opt.retries * 2)
-            throw new FatalError(`giving up: segment f${seg.first}+${seg.count} failed ${attempt} time(s) (${consecutiveFailures} consecutive failures). Last error: ${e.message}`);
+            throw new FatalError(`giving up: segment f${seg.first}+${seg.count} failed ${attempt} time(s) (${consecutiveFailures} consecutive failures). Last error: ${msg}`);
         }
       }
     }
@@ -756,8 +769,10 @@ async function renderVideo(opt, ctx) {
   fs.writeFileSync(list, segs.map(s => `file '${s.file.replace(/'/g, "'\\''")}'`).join('\n') + '\n');
   const durSec = total * fps.den / fps.num;
   const tmp = out.replace(/(\.\w+)?$/, '.partial$1');
+  ctx.finalTmp = tmp;
   const vf = [`settb=${fps.den}/${fps.num}`, 'setpts=N'];            // exact timestamps: frame N at N/fps
-  if (ctx.codecTag === 'mjpg') vf.push('scale=in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv');
+  // JFIF JPEGs are BT.601 full range; accurate rounding avoids a ~2-level darkening in the matrix conversion
+  if (ctx.codecTag === 'mjpg') vf.push('scale=in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv:flags=accurate_rnd+full_chroma_int+full_chroma_inp');
   vf.push('format=yuv420p');
   const args = ['-f', 'concat', '-safe', '0', '-i', list];
   if (opt.audio) args.push('-i', path.resolve(opt.audio));
@@ -788,7 +803,7 @@ async function renderVideo(opt, ctx) {
   const pr = await probe(out);
   const v = pr.streams.find(s => s.type === 'video'), a = pr.streams.find(s => s.type === 'audio');
   log(`[done] ${out}: ${v?.width}x${v?.height} ${v?.codec} ${v?.pix_fmt} ${v?.frames} frames @ ${fps.str} = ${(v?.frames * fps.den / fps.num).toFixed(3)} s` +
-      `${a ? `; audio ${a.codec} ${a.sample_rate} Hz ${a.channels}ch ${(a.end - a.start).toFixed(3)} s` : ''}; ${(fs.statSync(out).size / 1e6).toFixed(1)} MB; encode ${fmtDur(encSec)}`);
+      `${a ? `; audio ${a.codec} ${a.sample_rate} Hz ${a.channels}ch ends at ${a.end.toFixed(3)} s` : ''}; ${(fs.statSync(out).size / 1e6).toFixed(1)} MB; encode ${fmtDur(encSec)}`);
   if (v?.frames !== total) throw new FatalError(`final video has ${v?.frames} frames, expected ${total}`);
   return { ...summary, output: out, encodeSeconds: +encSec.toFixed(1), probe: pr };
 }
@@ -816,7 +831,7 @@ async function renderStills(opt, ctx) {
     for (const t of times) {
       if (t < 0 || t > info.duration) warn(`WARNING: still t=${t} is outside [0, ${info.duration}]`);
       const t0 = nowMs();
-      const b64 = await withTimeout(sh.page.evaluate(t => window.__rv.still(t), t), opt.frameTimeout * 1000, `still t=${t}`);
+      const b64 = await withTimeout(sh.evaluate(t => window.__rv.still(t), t), opt.frameTimeout * 1000, `still t=${t}`);
       const file = path.join(dir, `still_${t.toFixed(3).padStart(8, '0')}s.png`);
       fs.writeFileSync(file, Buffer.from(b64, 'base64'));
       files.push(file);
@@ -839,7 +854,7 @@ async function renderContact(opt, ctx) {
     log(`[contact] ${times.length} tiles ${ctx.w}x${ctx.h}, ${cols}x${rows} grid -> ${out}`);
     const t0 = nowMs();
     for (let i = 0; i < times.length; i++)
-      await withTimeout(sh.page.evaluate((t, i, c, r, l) => window.__rv.tile(t, i, c, r, l), times[i], i, cols, rows, `${fmtTime(times[i])}  (${times[i]}s)`), opt.frameTimeout * 1000, `contact t=${times[i]}`);
+      await withTimeout(sh.evaluate((t, i, c, r, l) => window.__rv.tile(t, i, c, r, l), times[i], i, cols, rows, `${fmtTime(times[i])}  (${times[i]}s)`), opt.frameTimeout * 1000, `contact t=${times[i]}`);
     const png = /\.png$/i.test(out);
     const b64 = await sh.page.evaluate((png) => window.__rv.sheetData(png ? 'image/png' : 'image/jpeg', 0.9), png);
     fs.writeFileSync(out, Buffer.from(b64, 'base64'));
@@ -855,7 +870,7 @@ async function main() {
   if (opt.help) { log(usage()); return; }
   const mode = opt.stills ? 'stills' : opt.contact ? 'contact' : 'video';
   const w = opt.w ?? (mode === 'contact' ? 640 : 1920), h = opt.h ?? (mode === 'contact' ? 360 : 1080);
-  const ctx = { opt, w, h, children: new Set(), shards: [], aborting: false, flip: true };
+  const ctx = { opt, w, h, children: new Set(), shards: [], aborting: false, flip: true, t0: nowMs() };
   const cleanup = async () => { ctx.aborting = true; for (const c of ctx.children) c.kill(); await Promise.all(ctx.shards.map(s => s.stop())); };
   let interrupted = false;
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => {
@@ -864,6 +879,7 @@ async function main() {
     warn(`\n[${sig}] stopping: killing browsers and encoders (completed segments are kept; rerun to resume)`);
     await cleanup();
     try { const d = path.resolve(opt.segmentsDir); for (const f of fs.readdirSync(d)) if (f.endsWith(`.${process.pid}.partial`)) fs.rmSync(path.join(d, f), { force: true }); } catch {}
+    if (ctx.finalTmp) fs.rmSync(ctx.finalTmp, { force: true });
     process.exit(130);
   });
   const t0 = nowMs();
@@ -871,6 +887,8 @@ async function main() {
   try {
     if (!['raw', 'jpeg', 'png', 'screenshot'].includes(opt.capture)) throw new UsageError(`bad --capture ${opt.capture}`);
     if (mode === 'video' && (w % 2 || h % 2)) throw new UsageError('--w and --h must be even for yuv420p output');
+    if (!(opt.start >= 0)) throw new UsageError('--start must be >= 0');
+    if (!(opt.segmentSeconds > 0) || !(opt.frameTimeout > 0) || !(opt.retries >= 1) || !(opt.maxInflight >= 1)) throw new UsageError('--segment-seconds, --frame-timeout, --retries and --max-inflight must be positive');
     ctx.fps = parseFps(opt.fps);
     let pagePath = opt.page;
     const abs = path.resolve(pagePath.split('?')[0]);

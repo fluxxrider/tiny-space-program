@@ -118,7 +118,7 @@ export default {
       globe.draw(cam, { time: t, alpha: ga, dotSize: 0.0105, sun: [0.3, 0.6, 0.8], night: 0.3, spread: ease.inOutCubic(clamp((lt - 20.5) / 7)) * 1.05, spreadCol: [1.0, 0.62, 0.3],
         regions: { us: [0.55, 0.75, 1.0, 0.8], china: [1, 0.65, 0.35, 0.8], other: REGION_COLORS.other } });
       o.save(); R.ga(ga * smooth((lt - 21) / 1));
-      label(o, 'SPECIAL ECONOMIC ZONES · ROBOT FACTORIES', 960, 250, { size: 14, color: COLORS.amber, tracking: 0.3, family: FONT.mono });
+      label(o, 'SPECIAL ECONOMIC ZONES · ROBOT FACTORIES', 960, 250, { size: 14, color: COLORS.amber, tracking: 0.3, family: FONT.mono, bg: 'rgba(3,5,9,0.66)' });
       o.restore();
     }
     // 7. treaty → Consensus-1

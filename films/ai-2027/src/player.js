@@ -79,7 +79,13 @@ export async function startPlayer({ audioSrc, loadFonts }) {
     playBtn.dataset.state = 'pause';
     clockAt = now();
     if (audioOk) {
-      try { audio.currentTime = clockBase; await audio.play(); } catch (e) { audioOk = false; }
+      try {
+        if (Math.abs(audio.currentTime - clockBase) > 0.25) audio.currentTime = clockBase;
+        await audio.play();
+      } catch (e) {
+        // playback falls back to the wall clock while the audio is paused; a later play() retries
+        console.warn('audio play failed', e && e.name);
+      }
     }
     requestAnimationFrame(loop);
     try { await navigator.wakeLock?.request('screen'); } catch (e) { /* optional */ }

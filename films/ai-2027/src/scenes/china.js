@@ -71,8 +71,8 @@ export default {
       o.shadowColor = COLORS.china; o.shadowBlur = 30;
       o.beginPath(); o.arc(s.x, s.y, 6, 0, Math.PI * 2); o.fill();
       o.shadowBlur = 0;
-      label(o, 'TIANWAN · CENTRALIZED DEVELOPMENT ZONE', s.x + 26, s.y - 36, { align: 'left', size: 15, color: COLORS.china, tracking: 0.2 });
-      label(o, 'DEEPCENT MEGA-DATACENTER', s.x + 26, s.y - 12, { align: 'left', size: 12, color: COLORS.dim, tracking: 0.2, family: FONT.mono });
+      label(o, 'TIANWAN · CENTRALIZED DEVELOPMENT ZONE', s.x + 26, s.y - 38, { align: 'left', size: 15, color: COLORS.china, tracking: 0.2, bg: 'rgba(3,5,9,0.66)' });
+      label(o, 'DEEPCENT MEGA-DATACENTER', s.x + 26, s.y - 10, { align: 'left', size: 12, color: COLORS.dim, tracking: 0.2, family: FONT.mono, bg: 'rgba(3,5,9,0.66)' });
       o.restore();
     }
     // DeepCent label during nationalization

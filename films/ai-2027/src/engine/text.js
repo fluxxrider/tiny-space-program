@@ -33,34 +33,55 @@ export function parseRuns(text) {
   return out;
 }
 
-/** Split runs into words (keeping trailing spaces) and wrap into lines within maxW. */
-export function layoutWords(ctx, runs, maxW, tracking = 0) {
+/**
+ * Split runs into words and wrap them into balanced lines within maxW. A word keeps `space` = whether whitespace
+ * followed it; words with no whitespace between them (an accent span followed by punctuation, e.g. "*Agent-3*,")
+ * are glued: drawn with only the tracking gap and never wrapped apart. A no-break space (U+00A0) also binds words;
+ * a newline forces a break.
+ */
+export function layoutWords(ctx, runs, maxW, tracking = 0, balance = true) {
   const words = [];
   for (const r of runs) {
-    const parts = r.text.split(/(\s+)/);
+    const parts = r.text.split(/([ \t\n]+)/);
     for (const p of parts) {
       if (p === '') continue;
-      if (/^\s+$/.test(p)) { if (words.length) words[words.length - 1].space = true; continue; }
+      if (/^[ \t\n]+$/.test(p)) {
+        if (words.length) { words[words.length - 1].space = true; if (p.includes('\n')) words[words.length - 1].br = true; }
+        continue;
+      }
       words.push({ text: p, accent: r.accent, space: false });
     }
   }
   const spaceW = ctx.measureText(' ').width + tracking;
   for (const w of words) w.w = measureTracked(ctx, w.text, tracking);
-  const lines = []; let line = []; let lw = 0;
-  for (let i = 0; i < words.length; i++) {
-    const w = words[i];
-    const add = (line.length ? spaceW : 0) + w.w;
-    if (line.length && lw + add > maxW) { lines.push({ words: line, w: lw }); line = []; lw = 0; }
-    lw += (line.length ? spaceW : 0) + w.w;
-    line.push(w);
+  const groups = [];
+  for (const w of words) {
+    const g = groups[groups.length - 1];
+    if (g && !g.words[g.words.length - 1].space) { g.words.push(w); g.w += tracking + w.w; }
+    else groups.push({ words: [w], w: w.w });
   }
-  if (line.length) lines.push({ words: line, w: lw });
-  // balance two-line captions: avoid a lonely last word
-  if (lines.length === 2 && lines[1].words.length === 1 && lines[0].words.length > 3) {
-    const mv = lines[0].words.pop();
-    lines[0].w -= spaceW + mv.w;
-    lines[1].words.unshift(mv); lines[1].w += spaceW + mv.w;
+  const wrap = (limit) => {
+    const lines = []; let line = []; let lw = 0;
+    for (const g of groups) {
+      if (line.length && lw + spaceW + g.w > limit) { lines.push({ groups: line, w: lw }); line = []; lw = 0; }
+      lw += (line.length ? spaceW : 0) + g.w;
+      line.push(g);
+      if (g.words[g.words.length - 1].br) { lines.push({ groups: line, w: lw }); line = []; lw = 0; } // hard break
+    }
+    if (line.length) lines.push({ groups: line, w: lw });
+    return lines;
+  };
+  let lines = wrap(maxW);
+  if (balance && lines.length > 1) {
+    // like CSS text-wrap: balance: the narrowest width that keeps the same number of lines
+    let lo = Math.max(...groups.map(g => g.w)), hi = maxW;
+    for (let i = 0; i < 16 && hi - lo > 1; i++) {
+      const mid = (lo + hi) / 2;
+      if (wrap(mid).length > lines.length) lo = mid; else hi = mid;
+    }
+    lines = wrap(hi);
   }
+  for (const L of lines) L.words = L.groups.flatMap(g => g.words);
   return { lines, spaceW };
 }
 
@@ -136,7 +157,7 @@ export function drawRich(ctx, text, t, t0, t1, opts) {
           drawTracked(ctx, w.text, cx, by + dy, tracking, (i) => ease.outCubic(clamp((ts - i * 0.02) / fin)));
         } else drawTracked(ctx, w.text, cx, by + dy, tracking);
       }
-      cx += w.w + spaceW;
+      cx += w.w + (w.space ? spaceW : tracking);
       wi++;
     }
   }

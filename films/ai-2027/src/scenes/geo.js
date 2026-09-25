@@ -59,8 +59,8 @@ export default {
         o.fillStyle = COLORS.us; o.beginPath(); o.arc(s.x, s.y, 3, 0, 7); o.fill();
       });
       o.fillStyle = COLORS.us; o.beginPath(); o.arc(ob.x, ob.y, 6, 0, 7); o.fill();
-      label(o, 'PLAN: CONSOLIDATE US COMPUTE', ob.x - 10, ob.y - 60, { align: 'left', size: 13, color: COLORS.us, tracking: 0.2, family: FONT.mono });
-      label(o, '(DEFENSE PRODUCTION ACT)', ob.x - 10, ob.y - 40, { align: 'left', size: 11, color: COLORS.dim, tracking: 0.2, family: FONT.mono });
+      label(o, 'PLAN: CONSOLIDATE US COMPUTE', ob.x - 10, ob.y - 60, { align: 'left', size: 13, color: COLORS.us, tracking: 0.2, family: FONT.mono, bg: 'rgba(3,5,9,0.66)' });
+      label(o, '(DEFENSE PRODUCTION ACT)', ob.x - 10, ob.y - 36, { align: 'left', size: 11, color: COLORS.dim, tracking: 0.2, family: FONT.mono, bg: 'rgba(3,5,9,0.66)' });
       o.restore();
     }
     // plan B: strike Chinese datacenters
@@ -75,20 +75,21 @@ export default {
       });
       const s0 = globe.screen(cam, CN_DC[0][0], CN_DC[0][1], 1);
       R.ga(pb);
-      label(o, 'LAST RESORT: STRIKE DATACENTERS', s0.x + 40, s0.y + 50, { align: 'left', size: 13, color: COLORS.danger, tracking: 0.2, family: FONT.mono });
+      label(o, 'LAST RESORT: STRIKE DATACENTERS', s0.x + 40, s0.y + 50, { align: 'left', size: 13, color: COLORS.danger, tracking: 0.2, family: FONT.mono, bg: 'rgba(3,5,9,0.66)' });
       o.restore();
     }
     // status box
     const sa = win(lt, 2.8, 10.2, 0.5, 0.3);
     if (sa > 0) {
       o.save(); R.ga(sa);
-      o.fillStyle = 'rgba(4,6,10,0.75)'; o.fillRect(130, 210, 420, 118);
-      o.strokeStyle = 'rgba(255,84,104,0.5)'; o.strokeRect(130, 210, 420, 118);
-      label(o, 'WHITE HOUSE · SITUATION ROOM', 150, 236, { align: 'left', size: 12, color: COLORS.danger, tracking: 0.3, weight: 600 });
+      const BY = 570; // bottom-left, over the Pacific: clear of the date HUD and the caption band
+      o.fillStyle = 'rgba(4,6,10,0.75)'; o.fillRect(110, BY, 420, 118);
+      o.strokeStyle = 'rgba(255,84,104,0.5)'; o.strokeRect(110, BY, 420, 118);
+      label(o, 'WHITE HOUSE · SITUATION ROOM', 130, BY + 26, { align: 'left', size: 12, color: COLORS.danger, tracking: 0.3, weight: 600 });
       const lines = ['LEAD OVER CHINA: MONTHS, NOT YEARS', 'MOOD: COLD WAR', 'CONTINGENCY PLANS: ACTIVE'];
       lines.forEach((l, i) => {
         const n = Math.floor(clamp((lt - 3.0 - i * 0.5) / 0.5) * l.length);
-        label(o, l.slice(0, n), 150, 266 + i * 22, { align: 'left', size: 13, color: COLORS.text, tracking: 0.12, family: FONT.mono });
+        label(o, l.slice(0, n), 130, BY + 56 + i * 22, { align: 'left', size: 13, color: COLORS.text, tracking: 0.12, family: FONT.mono });
       });
       o.restore();
     }

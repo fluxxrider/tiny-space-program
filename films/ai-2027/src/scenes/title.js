@@ -83,8 +83,8 @@ export default {
   grade(lt) {
     const hit2 = Math.max(0, Math.exp(-(lt - 5) * 3) * (lt >= 5 ? 1 : 0));
     return {
-      letterbox: 0, flash: Math.exp(-lt * 5) * 0.75 + hit2 * 0.25, bloom: 0.9, streak: 0.55, threshold: 0.8,
-      vignette: 0.75, grain: 0.04, exposure: 1.0 + hit2 * 0.4,
+      letterbox: 0, flash: Math.exp(-lt * 5) * 0.75 + hit2 * 0.14, bloom: 0.9, streak: 0.55, threshold: 0.8,
+      vignette: 0.75, grain: 0.04, exposure: 1.0 + hit2 * 0.22,
     };
   },
   render(R, t, lt) {
@@ -92,7 +92,7 @@ export default {
     R.nebula.draw({ time: t, alpha: 0.45, a: [0.03, 0.05, 0.12], b: [0.1, 0.04, 0.1] });
     R.stars.draw(cam0, { time: t, twinkle: 0.3, alpha: 0.7 });
     const dissolve = clamp((lt - 8.3) / 1.7);
-    const pulse = Math.exp(-(lt - 5) * 2.5) * (lt >= 5 ? 0.8 : 0);
+    const pulse = Math.exp(-(lt - 5) * 3.2) * (lt >= 5 ? 0.42 : 0);
     drawTitle(R, t, lt, { assemble: 0.9, holdPulse: pulse, dissolve, camZ: lerp(13.5, 11.8, ease.inOutQuad(lt / 10)) });
     // shockwave ring
     const o = R.o;

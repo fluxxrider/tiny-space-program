@@ -195,11 +195,18 @@ export function icon(o, name, x, y, s, color, a = 1, lw = 2) {
   o.restore();
 }
 
-export function label(o, text, x, y, { size = 14, color = COLORS.dim, align = 'center', tracking = 0.2, weight = 500, family = FONT.sans, baseline = 'middle' } = {}) {
+export function label(o, text, x, y, { size = 14, color = COLORS.dim, align = 'center', tracking = 0.2, weight = 500, family = FONT.sans, baseline = 'middle', bg = null } = {}) {
   setFont(o, { weight, size, family });
-  o.fillStyle = color; o.textBaseline = baseline;
   const tr = size * tracking;
   const w = measureTracked(o, text, tr);
-  drawTracked(o, text, align === 'center' ? x - w / 2 : align === 'right' ? x - w : x, y, tr);
+  const lx = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x;
+  if (bg) {
+    // backing pill so the label stays legible over bright map dots
+    const px = size * 0.7, py = size * 0.5;
+    const top = baseline === 'middle' ? y - size / 2 : baseline === 'top' ? y : y - size * 0.78;
+    o.save(); o.fillStyle = bg; roundRect(o, lx - px, top - py, w + 2 * px, size + 2 * py, size * 0.4); o.fill(); o.restore();
+  }
+  o.fillStyle = color; o.textBaseline = baseline;
+  drawTracked(o, text, lx, y, tr);
   return w;
 }

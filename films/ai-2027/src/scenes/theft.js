@@ -63,18 +63,18 @@ export default {
     if (sfS && la > 0) {
       R.ga(la * sfS.vis);
       o.fillStyle = COLORS.us; o.beginPath(); o.arc(sfS.x, sfS.y, 5, 0, 7); o.fill();
-      label(o, 'OPENBRAIN', sfS.x - 14, sfS.y - 24, { align: 'right', size: 15, color: COLORS.us, tracking: 0.3, weight: 600 });
+      label(o, 'OPENBRAIN', sfS.x - 14, sfS.y - 24, { align: 'right', size: 15, color: COLORS.us, tracking: 0.3, weight: 600, bg: 'rgba(3,5,9,0.66)' });
     }
     if (twS && la > 0) {
       R.ga(la * twS.vis);
       o.fillStyle = COLORS.china; o.beginPath(); o.arc(twS.x, twS.y, 5, 0, 7); o.fill();
-      label(o, 'DEEPCENT · TIANWAN CDZ', twS.x + 14, twS.y - 24, { align: 'left', size: 15, color: COLORS.china, tracking: 0.3, weight: 600 });
+      label(o, 'DEEPCENT · TIANWAN CDZ', twS.x + 14, twS.y - 24, { align: 'left', size: 15, color: COLORS.china, tracking: 0.3, weight: 600, bg: 'rgba(3,5,9,0.66)' });
     }
     o.restore();
     // terminal
     const ta = win(lt, 2.8, 12.6, 0.4, 0.5);
     if (ta > 0) {
-      const X = 110, Y = 560;
+      const X = 110, Y = 655; // box spans y 295–625: below the date HUD, above the captions
       o.save(); R.ga(ta);
       o.fillStyle = 'rgba(4,6,10,0.8)'; o.fillRect(X, Y - 360, 640, 330);
       o.strokeStyle = 'rgba(255,84,104,0.45)'; o.strokeRect(X, Y - 360, 640, 330);
@@ -110,7 +110,7 @@ export default {
     const fa = win(lt, 11.6, 13.4, 0.2, 0.5);
     if (fa > 0 && twS) {
       o.save(); R.ga(fa);
-      label(o, 'US CYBERATTACK · BLOCKED · AIR-GAPPED', twS.x + 14, twS.y + 26, { align: 'left', size: 13, color: COLORS.ice, tracking: 0.2, family: FONT.mono });
+      label(o, 'US CYBERATTACK · BLOCKED · AIR-GAPPED', twS.x + 14, twS.y + 26, { align: 'left', size: 13, color: COLORS.ice, tracking: 0.2, family: FONT.mono, bg: 'rgba(3,5,9,0.66)' });
       o.restore();
     }
     // Taiwan: ships circling

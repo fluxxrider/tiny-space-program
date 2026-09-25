@@ -232,7 +232,7 @@ export function build(B) {
   chords('jobs', 0, jb, { inst: 'strings', vel: 0.22 });
   melody('jobs', 0.5, [['F5', 2], ['E5', 1], ['D5', 1], ['C5', 3], ['A4', 1], ['Bb4', 2], ['A4', 2], ['G4', 2], ['F4', 2], ['E4', 4]], { inst: 'piano', vel: 0.45 });
   pianoArp('jobs', 0, jb, { vel: 0.22, rate: 2 });
-  I.whoosh(X, SEC.jobs.start + 2.7, 1.2, 0.35, { up: false });
+  I.whoosh(X, SEC.jobs.start + 3.3, 1.1, 0.35, { up: false });
   I.crowd(F, T('jobs', 3.7), 4.5, 0.55);
 
   // ================= S10 2027 (2 bars)
@@ -371,7 +371,7 @@ export function build(B) {
 
   // ================= S19 LEAK — Oct 2027 (10 bars)
   const lk = SEC.leak.start;
-  for (let k = 0; k < 24; k++) I.tick(F, lk + LEAK.memo + k * 0.13, 0.4, { freq: 1500 + (k % 3) * 200 });
+  for (let k = 0; k < 16; k++) I.tick(F, lk + LEAK.memo + k * 0.12, 0.4, { freq: 1500 + (k % 3) * 200 });
   I.impact(X, lk + LEAK.front, 1.0);
   I.stab(X, lk + LEAK.front, ['D2', 'A2', 'D3', 'F3', 'A3'], 0.8, { len: 0.6 });
   I.crash(X, lk + LEAK.front, 0.6);
