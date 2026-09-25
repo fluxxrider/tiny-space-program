@@ -8,7 +8,7 @@ import {
   dbToGain, gainToDb, pingPongDelay,
 } from './dsp.js';
 import { build } from './score.js';
-import { SEC, SECTIONS, DURATION } from '../src/structure.js';
+import { SEC, SECTIONS, DURATION, BEAT } from '../src/structure.js';
 import { REWIND_LEN } from '../src/timing.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -102,6 +102,16 @@ log('reverb done');
     mixR[r0 + i] = mixR[r0 + i] * 0.35 + outR[i] * g;
   }
   log('rewind rendered');
+}
+
+// ---- BREATH: a sixteenth note of near-silence before the title drop, so the hit lands out of a hush
+{
+  const hit = Math.round(SEC.title.start * SR), a = hit - Math.round(BEAT / 4 * SR);
+  const fall = Math.round(0.02 * SR), rise = Math.round(0.002 * SR), dip = dbToGain(-24);
+  for (let i = a; i < hit; i++) {
+    const g = i < a + fall ? 1 + (dip - 1) * (i - a) / fall : i < hit - rise ? dip : dip + (1 - dip) * (i - (hit - rise)) / rise;
+    mixL[i] *= g; mixR[i] *= g;
+  }
 }
 
 // ---- master

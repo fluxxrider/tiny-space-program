@@ -9,4 +9,6 @@ dependencies.
 - Picture: `films/ai-2027/src/`. `film.render(t)` is deterministic; scenes live in `src/scenes/`, one per section of
   `src/structure.js`.
 - Sound: `films/ai-2027/audio/`, pure-JS synthesis rendered offline to WAV by `render-score.mjs`.
+- The finished film is `films/ai-2027/dist/ai-2027-film.mp4` (1080p24, ~95 MB), made by `tools/render-video.mjs`
+  (segments) and `tools/encode-share.mjs` (2-pass encode with the score).
 - Output (`films/ai-2027/out/`) is gitignored; see `films/ai-2027/README.md` for the full rebuild recipe.
