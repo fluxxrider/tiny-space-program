@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>AI 2027 asset check</title>
+<style>
+  :root { --bg: #0a0d14; --fg: #cfd6e4; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { width: 1600px; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="type" width="1600" height="1950"></canvas>
+<canvas id="map" width="1600" height="1000"></canvas>
+<script type="module">
+// Visual check for src/data/fonts.js and src/data/land.js. Rendered by tools/verify-assets.mjs (headless Chrome),
+// which saves out/verify-assets.png and prints window.__verify (per-glyph font probes, counts).
+import { FONTS, loadFonts, MISSING_GLYPHS, FONT_CREDITS } from '../src/data/fonts.js';
+import { decodeLand, decodeLights, PLACES, REGION, LAND_CREDITS, latLonToVec3 } from '../src/data/land.js';
+
+const report = { done: false, errors: [], fonts: {}, stretch: {}, counts: {} };
+window.__verify = report;
+const LABEL = '13px "DejaVu Sans", "Liberation Sans", sans-serif';
+
+try {
+  const faces = await loadFonts();
+  report.facesLoaded = faces.filter((f) => f.status === 'loaded').length + '/' + FONTS.length;
+  drawType();
+  drawMap();
+} catch (e) {
+  report.errors.push(String(e && e.stack || e));
+  console.error(e);
+}
+report.done = true;
+
+function drawType() {
+  const c = document.getElementById('type'), g = c.getContext('2d');
+  g.fillStyle = '#0a0d14'; g.fillRect(0, 0, c.width, c.height);
+
+  g.fillStyle = '#f2f5fb';
+  g.font = "800 64px 'Archivo'"; g.fontStretch = 'expanded';
+  g.fillText('AI 2027', 40, 84);
+  g.fontStretch = 'normal';
+  g.font = "300 22px 'Inter'"; g.fillStyle = '#8f9bb3';
+  g.fillText('asset check — fonts.js (' + FONTS.length + ' faces) · land.js', 400, 80);
+
+  const lineA = 'AI 2027 · 10²⁸ FLOP · 1,000× GPT-4 · net approval −35%';
+  const lineB = 'Agent-4 — misaligned · “quotes” ’ … → ← ↑ ▲ ■ ± ≈ • ⁰¹²³⁴⁵⁶⁷⁸⁹';
+  const rows = [
+    ['Inter', 'normal', 100], ['Inter', 'normal', 300], ['Inter', 'normal', 400], ['Inter', 'normal', 600], ['Inter', 'normal', 900],
+    ['Archivo', 'normal', 800, 'expanded'], ['Archivo', 'normal', 400, 'normal'], ['Archivo', 'normal', 600, 'extra-condensed'],
+    ['Cormorant Garamond', 'normal', 300], ['Cormorant Garamond', 'normal', 400], ['Cormorant Garamond', 'normal', 500], ['Cormorant Garamond', 'normal', 600],
+    ['Cormorant Garamond', 'italic', 300], ['Cormorant Garamond', 'italic', 400], ['Cormorant Garamond', 'italic', 500], ['Cormorant Garamond', 'italic', 600],
+    ['JetBrains Mono', 'normal', 100], ['JetBrains Mono', 'normal', 400], ['JetBrains Mono', 'normal', 800],
+  ];
+  let y = 150;
+  for (const [family, style, weight, stretch = 'normal'] of rows) {
+    g.font = LABEL; g.fillStyle = '#6f7a91'; g.fontStretch = 'normal';
+    g.fillText(`${family}`, 40, y - 8);
+    g.fillText(`${style === 'italic' ? 'italic ' : ''}${weight}${stretch !== 'normal' ? ' · ' + stretch : ''}`, 40, y + 12);
+    const size = family === 'Cormorant Garamond' ? 30 : 25;
+    g.font = `${style} ${weight} ${size}px '${family}'`; g.fontStretch = stretch;
+    g.fillStyle = '#eef2fa';
+    g.fillText(lineA, 250, y - 6);
+    g.fillText(lineB, 250, y + 24);
+    y += 76;
+  }
+
+  // Archivo width axis really responds (canvas fontStretch → wdth).
+  for (const s of ['extra-condensed', 'normal', 'expanded']) {
+    g.font = "800 40px 'Archivo'"; g.fontStretch = s;
+    report.stretch[s] = Math.round(g.measureText('AI 2027 ARCHIVO').width);
+  }
+  g.fontStretch = 'normal';
+
+  // Glyph probe: a glyph comes from the webfont iff its advance is identical with three different fallbacks behind it.
+  y += 10;
+  g.font = "600 16px 'Inter'"; g.fillStyle = '#8f9bb3';
+  g.fillText('GLYPH COVERAGE — each glyph drawn in the webfont; underline green = webfont renders it, red = falls back to another font', 40, y);
+  y += 22;
+  const probe = [...'×—–’“”…·•→←↑▲■±≈−⁰¹²³⁴⁵⁶⁷⁸⁹'];
+  const combos = [['Inter', 'normal'], ['Archivo', 'normal'], ['Cormorant Garamond', 'normal'], ['Cormorant Garamond', 'italic'], ['JetBrains Mono', 'normal']];
+  for (const [family, style] of combos) {
+    const missing = [];
+    g.font = LABEL; g.fillStyle = '#6f7a91';
+    g.fillText(`${family}${style === 'italic' ? ' italic' : ''}`, 40, y + 26);
+    probe.forEach((ch, i) => {
+      const w = ['monospace', 'serif', '"Unifont"'].map((fb) => { g.font = `${style} 400 40px '${family}', ${fb}`; return g.measureText(ch).width; });
+      const ok = w[0] === w[1] && w[1] === w[2];
+      if (!ok) missing.push(ch);
+      const x = 250 + i * 40;
+      g.font = `${style} 400 34px '${family}'`; g.fillStyle = '#eef2fa';
+      g.fillText(ch, x, y + 30);
+      g.fillStyle = ok ? '#3ddc84' : '#ff4d4d';
+      g.fillRect(x, y + 38, 30, 3);
+    });
+    const key = family + (style === 'italic' ? ' italic' : '');
+    const expected = (MISSING_GLYPHS[family] && MISSING_GLYPHS[family][style]) || '';
+    report.fonts[key] = { browserMissing: missing.join(''), cmapMissing: expected, agree: missing.join('') === expected };
+    g.font = LABEL; g.fillStyle = missing.join('') === expected ? '#3ddc84' : '#ff4d4d';
+    g.fillText(missing.length ? `fallback: ${missing.join(' ')} ${missing.join('') === expected ? '= cmap audit' : '≠ cmap audit: ' + (expected || 'none')}` : 'all webfont ✓', 250 + probe.length * 40 + 12, y + 26);
+    y += 56;
+  }
+  g.font = LABEL; g.fillStyle = '#6f7a91';
+  g.fillText(FONT_CREDITS, 40, y + 16);
+  report.typeHeight = y + 30;
+}
+
+function drawMap() {
+  const c = document.getElementById('map'), g = c.getContext('2d');
+  const W = 1600, H = 800;
+  g.fillStyle = '#060a12'; g.fillRect(0, 0, c.width, c.height);
+  const px = (lonDeg) => ((lonDeg + 180) / 360) * W;
+  const py = (latDeg) => ((90 - latDeg) / 180) * H;
+
+  g.strokeStyle = 'rgba(120,140,180,0.18)'; g.lineWidth = 1;
+  for (let lon = -180; lon <= 180; lon += 30) { g.beginPath(); g.moveTo(px(lon) + 0.5, 0); g.lineTo(px(lon) + 0.5, H); g.stroke(); }
+  for (let lat = -90; lat <= 90; lat += 30) { g.beginPath(); g.moveTo(0, py(lat) + 0.5); g.lineTo(W, py(lat) + 0.5); g.stroke(); }
+  g.strokeStyle = 'rgba(160,180,220,0.4)';
+  g.beginPath(); g.moveTo(0, py(0) + 0.5); g.lineTo(W, py(0) + 0.5); g.moveTo(px(0) + 0.5, 0); g.lineTo(px(0) + 0.5, H); g.stroke();
+
+  const COLORS = { [REGION.OTHER]: '#56657f', [REGION.US]: '#3d9bff', [REGION.CHINA]: '#ff4040', [REGION.TAIWAN]: '#35f0a0' };
+  const land = decodeLand();
+  const R2D = 180 / Math.PI;
+  const counts = [0, 0, 0, 0];
+  for (let i = 0; i < land.count; i++) {
+    const r = land.region[i]; counts[r]++;
+    g.fillStyle = COLORS[r];
+    const s = r === REGION.TAIWAN ? 4 : 2.2;
+    g.fillRect(px(land.lon[i] * R2D) - s / 2, py(land.lat[i] * R2D) - s / 2, s, s);
+  }
+  const lights = decodeLights();
+  g.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < lights.count; i++) {
+    g.fillStyle = `rgba(255, 214, 90, ${0.25 + 0.75 * lights.weight[i]})`;
+    g.beginPath(); g.arc(px(lights.lon[i] * R2D), py(lights.lat[i] * R2D), 1.1 + 1.2 * lights.weight[i], 0, Math.PI * 2); g.fill();
+  }
+  g.globalCompositeOperation = 'source-over';
+
+  g.font = "500 12px 'Inter'";
+  for (const [key, p] of Object.entries(PLACES)) {
+    const x = px(p.lon), y = py(p.lat);
+    g.strokeStyle = '#ffffff'; g.lineWidth = 1.5; g.beginPath(); g.arc(x, y, 4, 0, Math.PI * 2); g.stroke();
+    g.fillStyle = '#ffffff';
+    const right = !['tianwan', 'shanghai', 'nyc', 'tokyo'].includes(key);
+    g.textAlign = right ? 'left' : 'right';
+    g.fillText(p.label, x + (right ? 7 : -7), y + (key === 'beijing' ? -6 : key === 'shanghai' ? 12 : 4));
+  }
+  g.textAlign = 'left';
+
+  // Legend band.
+  const y0 = H + 34;
+  g.font = "700 18px 'Archivo'"; g.fontStretch = 'expanded'; g.fillStyle = '#eef2fa';
+  g.fillText('DOTTED GLOBE · EQUIRECTANGULAR', 30, y0);
+  g.fontStretch = 'normal';
+  const items = [['United States', REGION.US], ['China (incl. HK, Macau)', REGION.CHINA], ['Taiwan', REGION.TAIWAN], ['Other land', REGION.OTHER]];
+  g.font = "400 15px 'Inter'";
+  items.forEach(([name, r], i) => {
+    const x = 30 + i * 250, y = y0 + 34;
+    g.fillStyle = COLORS[r]; g.fillRect(x, y - 10, 12, 12);
+    g.fillStyle = '#cfd6e4'; g.fillText(`${name}  ${counts[r].toLocaleString('en-US')}`, x + 20, y);
+  });
+  g.fillStyle = 'rgb(255,214,90)'; g.beginPath(); g.arc(36, y0 + 64, 5, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#cfd6e4';
+  g.fillText(`City lights  ${lights.count.toLocaleString('en-US')} (weight = brightness)    ·    land dots ${land.count.toLocaleString('en-US')}`, 50, y0 + 69);
+  g.font = "400 12px 'JetBrains Mono'"; g.fillStyle = '#6f7a91';
+  g.fillText(LAND_CREDITS, 30, y0 + 104);
+  g.fillText('insets: orthographic, x = cos(lat)·sin(lon), y = sin(lat), z = cos(lat)·cos(lon) — viewed from the stated centre', 30, y0 + 124);
+
+  // Orthographic insets: checks the documented 3D convention (view from +z shows lon 0 = Africa/Europe, east to the right).
+  globe(g, 1200, H + 108, 80, 0, 0, 'lon 0 → +z', land, COLORS);
+  globe(g, 1440, H + 108, 80, 25 * Math.PI / 180, 110 * Math.PI / 180, '25°N 110°E', land, COLORS);
+  report.counts = { land: land.count, lights: lights.count, us: counts[1], china: counts[2], taiwan: counts[3], other: counts[0] };
+}
+
+function globe(g, cx, cy, R, lat0, lon0, label, land, COLORS) {
+  g.fillStyle = '#0d1422'; g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.fill();
+  const v = [0, 0, 0];
+  const cl = Math.cos(lon0), sl = Math.sin(lon0), ct = Math.cos(lat0), st = Math.sin(lat0);
+  for (let i = 0; i < land.count; i++) {
+    latLonToVec3(land.lat[i], land.lon[i], 1, v);
+    const x1 = v[0] * cl - v[2] * sl, z1 = v[0] * sl + v[2] * cl;   // rotate lon0 → +z
+    const y2 = v[1] * ct - z1 * st, z2 = v[1] * st + z1 * ct;       // tilt lat0 → centre
+    if (z2 <= 0) continue;
+    g.fillStyle = COLORS[land.region[i]];
+    g.fillRect(cx + x1 * R - 0.8, cy - y2 * R - 0.8, 1.6, 1.6);
+  }
+  g.font = "400 11px 'JetBrains Mono'"; g.fillStyle = '#8f9bb3'; g.textAlign = 'center';
+  g.fillText(label, cx, cy - R - 7);
+  g.textAlign = 'left';
+}
+</script>
+</body>
+</html>

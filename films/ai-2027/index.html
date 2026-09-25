@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>The AI 2027 Film</title>
+<style>html,body{margin:0}
+[hidden]{display:none!important}
+:root{--ink:#050608;--panel:#0b0e13;--line:rgba(160,190,220,.18);--text:#e9edf2;--dim:#8a96a3;--ice:#9ed8ff;--gold:#ffc978;--red:#ff5468;color-scheme:dark}
+html,body{background:var(--ink)}
+body{color:var(--text);font:15px/1.55 Inter,"Helvetica Neue",Arial,sans-serif;padding-inline:16px;padding-block:20px 48px}
+.wrap{max-width:1180px;margin:0 auto;display:grid;gap:22px}
+.masthead{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px 24px}
+.logo{margin:0;font:300 clamp(26px,4.2vw,40px)/1 Archivo,Inter,Arial,sans-serif;font-stretch:125%;letter-spacing:.32em;text-transform:uppercase}
+.kicker{margin:0;color:var(--dim);font:500 12px/1.4 Inter,Arial,sans-serif;letter-spacing:.24em;text-transform:uppercase}
+.stage{position:relative;width:100%;max-width:calc((100vh - 40px)*16/9);margin:0 auto;aspect-ratio:16/9;background:#000;overflow:hidden;border-radius:4px;box-shadow:0 30px 80px rgba(0,0,0,.6),0 0 0 1px var(--line);user-select:none;-webkit-user-select:none}
+.screen{position:absolute;inset:0}
+.stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block;opacity:0;transition:opacity 1.2s ease;cursor:pointer}
+.stage canvas.ready{opacity:1}
+.poster{position:absolute;inset:0;display:grid;place-content:center;gap:14px;text-align:center;transition:opacity 1s ease;background:radial-gradient(ellipse at 50% 55%,#0d1522 0%,#050608 70%)}
+.poster.faded{opacity:0;pointer-events:none}
+.poster-title{font:200 clamp(34px,8vw,92px)/1 Archivo,Inter,Arial,sans-serif;font-stretch:125%;letter-spacing:.3em;padding-left:.3em}
+.poster-sub{color:var(--dim);font:500 clamp(10px,1.4vw,13px)/1.4 Inter,Arial,sans-serif;letter-spacing:.3em;text-transform:uppercase}
+.loading{position:absolute;left:50%;bottom:14%;transform:translateX(-50%);display:grid;gap:10px;justify-items:center;color:var(--dim);font:500 11px/1 Inter,Arial,sans-serif;letter-spacing:.25em;text-transform:uppercase}
+.loading i{display:block;width:180px;height:2px;background:var(--line);position:relative;overflow:hidden}
+.loading i::after{content:"";position:absolute;inset:0 auto 0 0;width:var(--p,4%);background:var(--ice);transition:width .3s}
+.bigplay{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:14px;padding:14px 26px 14px 18px;border:1px solid rgba(233,237,242,.35);border-radius:999px;background:rgba(5,6,8,.55);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);color:var(--text);font:500 14px/1 Inter,Arial,sans-serif;letter-spacing:.2em;text-transform:uppercase;white-space:nowrap;cursor:pointer;transition:background .2s,border-color .2s}
+.bigplay:hover,.bigplay:focus-visible{background:rgba(158,216,255,.14);border-color:var(--ice);outline:none}
+.bigplay svg{width:22px;height:22px;fill:currentColor}
+.controls{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:12px;padding:28px 14px 10px;background:linear-gradient(transparent,rgba(0,0,0,.78));opacity:1;transition:opacity .35s}
+.stage.playing:not(.awake) .controls,.stage.playing:not(.awake) .chapter-now{opacity:0}
+.stage.playing:not(.awake) canvas{cursor:none}
+.ctl{flex:none;width:34px;height:34px;display:grid;place-items:center;border:0;border-radius:50%;background:transparent;color:var(--text);cursor:pointer}
+.ctl:hover,.ctl:focus-visible{background:rgba(255,255,255,.1);outline:none}
+.ctl svg{width:18px;height:18px;fill:currentColor}
+.ctl[data-state="play"] .i-pause,.ctl[data-state="pause"] .i-play{display:none}
+.bar{position:relative;flex:1;min-width:60px;height:22px;display:flex;align-items:center}
+.ticks{position:absolute;left:0;right:0;top:50%;height:0;pointer-events:none}
+.tick{position:absolute;top:-5px;width:1px;height:10px;background:rgba(233,237,242,.35)}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:22px;margin:0;background:transparent;cursor:pointer;--fill:0%}
+input[type=range]::-webkit-slider-runnable-track{height:3px;background:linear-gradient(90deg,var(--ice) var(--fill),rgba(233,237,242,.22) var(--fill))}
+input[type=range]::-moz-range-track{height:3px;background:rgba(233,237,242,.22)}
+input[type=range]::-moz-range-progress{height:3px;background:var(--ice)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;margin-top:-5px;border-radius:50%;background:var(--text);border:0}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--text);border:0}
+input[type=range]:focus-visible{outline:1px solid var(--ice);outline-offset:2px}
+.time{flex:none;color:var(--text);font:400 12px/1 "JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;letter-spacing:.05em}
+.chapter-now{position:absolute;left:14px;bottom:50px;color:var(--dim);font:500 11px/1.3 Inter,Arial,sans-serif;letter-spacing:.2em;text-transform:uppercase;transition:opacity .35s;pointer-events:none}
+.stage:fullscreen{max-width:none;border-radius:0;box-shadow:none;aspect-ratio:auto}
+.stage:fullscreen .screen{position:absolute;inset:0;aspect-ratio:auto}
+.stage:fullscreen .controls{position:absolute}
+.stage:fullscreen canvas{object-fit:contain}
+.stage.pseudo-fs{position:fixed;inset:0;z-index:9;max-width:none;aspect-ratio:auto;border-radius:0}
+.stage.pseudo-fs canvas{object-fit:contain}
+.note{margin:0;padding:12px 14px;border:1px solid var(--line);border-radius:4px;color:var(--text);background:var(--panel)}
+.about{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:28px 40px;align-items:start}
+.about h2{margin:0 0 10px;font:500 12px/1.4 Inter,Arial,sans-serif;letter-spacing:.24em;text-transform:uppercase;color:var(--dim)}
+.about p{margin:0 0 12px;max-width:62ch;color:#c9d1da}
+.about a{color:var(--ice);text-underline-offset:3px}
+.chapters{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:6px}
+.chap{display:flex;gap:12px;align-items:baseline;padding:9px 12px;border:1px solid var(--line);border-radius:3px;background:var(--panel);color:var(--text);text-align:left;font:400 13px/1.35 Inter,Arial,sans-serif;cursor:pointer}
+.chap:hover,.chap:focus-visible{border-color:var(--ice);outline:none}
+.chap-t{flex:none;min-width:3.2em;color:var(--ice);font:400 12px/1.35 "JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+@media (max-width:760px){.about{grid-template-columns:1fr}.masthead{justify-content:flex-start}.bigplay{padding:10px 18px 10px 12px;font-size:12px;letter-spacing:.14em}.chapter-now,.poster-sub{display:none}
+.stage:not(:fullscreen){aspect-ratio:auto;max-width:100%}
+.stage:not(:fullscreen) .screen{position:relative;aspect-ratio:16/9}
+.stage:not(:fullscreen) .controls{position:relative;padding:8px 6px;background:var(--panel);opacity:1!important}
+.loading{bottom:10%}}
+@media (prefers-reduced-motion:reduce){.stage canvas,.poster,.controls{transition:none}}
+
+body.render{margin:0;padding:0;overflow:hidden;background:#000}
+body.render .wrap{display:none}
+</style>
+</head>
+<body>
+<canvas id="render-canvas" hidden></canvas>
+
+<main class="wrap">
+  <header class="masthead">
+    <h1 class="logo">AI 2027</h1>
+    <p class="kicker">An explainer film · 7:52 · sound on</p>
+  </header>
+  <section id="stage" class="stage" aria-label="Film player">
+    <div class="screen">
+    <canvas id="film" aria-label="AI 2027 explainer film"></canvas>
+    <div id="poster" class="poster" aria-hidden="true">
+      <span class="poster-title">AI 2027</span>
+      <span class="poster-sub">What happens if superhuman AI arrives this decade</span>
+    </div>
+    <div id="loading" class="loading" role="status"><span>Preparing the film</span><i></i></div>
+    <button id="bigplay" class="bigplay" type="button" hidden><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg><span>Play the film</span></button>
+    <div id="chapter" class="chapter-now"></div>
+    </div>
+    <div class="controls">
+      <button id="play" class="ctl" type="button" aria-label="Play" data-state="play"><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg><svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4.5v16H6zM13.5 4H18v16h-4.5z"/></svg></button>
+      <div class="bar"><div id="ticks" class="ticks"></div><input id="scrub" type="range" min="0" max="472.5" step="0.05" value="0" aria-label="Seek"></div>
+      <span id="time" class="time">0:00 / 7:52</span>
+      <button id="fs" class="ctl" type="button" aria-label="Fullscreen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5v2H6v3zm11-5h5v5h-2V6h-3zM6 15v3h3v2H4v-5zm12 0h2v5h-5v-2h3z"/></svg></button>
+    </div>
+  </section>
+  <p id="note" class="note" hidden></p>
+  <section class="about">
+    <div>
+      <h2>About this film</h2>
+      <p>In April 2025, Daniel Kokotajlo, Scott Alexander, Thomas Larsen, Eli Lifland and Romeo Dean of the AI Futures Project published <a href="https://ai-2027.com" target="_blank" rel="noopener">AI 2027</a>, a month-by-month scenario for how superhuman AI could arrive, and two ways it could end.</p>
+      <p>This unofficial explainer follows the scenario from the first stumbling agents in 2025 to the committee vote in October 2027 and both of its endings. Every frame is rendered live in your browser, and the original score was synthesized in code.</p>
+      <p>Space plays and pauses, the arrow keys skip five seconds, and F toggles fullscreen.</p>
+    </div>
+    <div>
+      <h2>Chapters</h2>
+      <div id="chapters" class="chapters"></div>
+    </div>
+  </section>
+</main>
+<script>
+  window.__AUDIO_SRC = 'out/score.mp3';
+  if (new URLSearchParams(location.search).has('render')) document.body.classList.add('render');
+</script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
