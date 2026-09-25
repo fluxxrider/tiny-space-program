@@ -62,16 +62,17 @@ export default {
         if (y < 120 || y > 980) continue;
         const line = CODE[(li * 7 + ci * 13) % CODE.length];
         const edge = Math.min(1, (y - 120) / 120, (980 - y) / 120);
-        const isNew = ci === 4 && k > 1080 / lh - 6;
+        const quiet = 1 - 0.8 * smooth((y - 690) / 110);   // keep the caption band (lower third) calm
+        const hud = ci === 1 || ci === 4 ? 1 : 1 - 0.75 * (1 - smooth((y - 250) / 70)); // and the HUD corners
         let shown = line;
         if (ci === 4) {
           // the front column is being typed live at the bottom
           const typeP = clamp(((scroll % lh) / lh) * 1.4);
-          if (k >= Math.floor(840 / lh) - 1) shown = line.slice(0, Math.floor(line.length * typeP));
+          if (y >= 640) shown = line.slice(0, Math.floor(line.length * typeP));
         }
-        drawCodeLine(o, shown, c.x, y, size, c.a * edge * reveal * R.alpha * (isNew ? 1 : 1));
+        drawCodeLine(o, shown, c.x, y, size, c.a * edge * quiet * hud * reveal * R.alpha);
         if (ci === 4 && hash1(li * 3.3) > 0.8) {
-          o.globalAlpha = 0.12 * edge * reveal;
+          o.globalAlpha = 0.12 * edge * quiet * reveal;
           o.fillStyle = COLORS.green;
           o.fillRect(c.x - 12, y - size, 560, lh);
         }
@@ -84,13 +85,14 @@ export default {
       o.save();
       R.ga(ba);
       o.fillStyle = 'rgba(6,10,16,0.85)';
-      o.fillRect(1180, 200, 560, 150);
-      o.strokeStyle = 'rgba(158,216,255,0.5)'; o.strokeRect(1180, 200, 560, 150);
+      const BY = 300; // below the multiplier gauge in the top-right corner
+      o.fillRect(1180, BY, 560, 150);
+      o.strokeStyle = 'rgba(158,216,255,0.5)'; o.strokeRect(1180, BY, 560, 150);
       setFont(o, { weight: 300, size: 46, family: FONT.wide, stretch: 'expanded' });
       o.fillStyle = COLORS.ice; o.textBaseline = 'alphabetic';
-      o.fillText(decodeText('AGENT-1', clamp((lt - 3.6) / 0.8), 3), 1210, 268);
+      o.fillText(decodeText('AGENT-1', clamp((lt - 3.6) / 0.8), 3), 1210, BY + 68);
       const tests = Math.floor(Math.max(0, lt - 4) * 740 + 1200);
-      label(o, `${tests.toLocaleString('en-US')} TESTS PASSED  ·  ${Math.floor(Math.max(0, lt - 4) * 9 + 31)} PULL REQUESTS MERGED`, 1210, 312, { align: 'left', size: 13, color: COLORS.green, tracking: 0.12, family: FONT.mono });
+      label(o, `${tests.toLocaleString('en-US')} TESTS PASSED  ·  ${Math.floor(Math.max(0, lt - 4) * 9 + 31)} PULL REQUESTS MERGED`, 1210, BY + 112, { align: 'left', size: 13, color: COLORS.green, tracking: 0.12, family: FONT.mono });
       o.restore();
     }
   },
