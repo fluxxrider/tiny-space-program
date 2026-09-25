@@ -10,7 +10,7 @@ score is synthesized in JavaScript. There are no samples, stock footage or prere
 
 ## Watch
 
-- **Video:** `out/ai-2027-film.mp4` after rendering (see below).
+- **Video:** `dist/ai-2027-film.mp4`: 1080p24 H.264 with AAC audio, about 95 MB.
 - **In the browser:** `node tools/serve.mjs` from the repo root, then open
   <http://localhost:8765/films/ai-2027/>. The film renders live and is synced to the soundtrack.
   Space plays and pauses, the arrow keys skip 5 s, F toggles fullscreen.
@@ -44,12 +44,17 @@ npm install                                             # puppeteer-core + esbui
 node films/ai-2027/tools/prepare-assets.mjs             # fonts + globe data (already committed in src/data)
 node films/ai-2027/audio/render-score.mjs               # → films/ai-2027/out/score.wav (~1 min)
 node films/ai-2027/tools/build-artifact.mjs             # → index.html, dist/ai-2027.html, dist/score.mp3
-node films/ai-2027/tools/render-video.mjs --fps 24 --query grain=0.4 \
-     --audio films/ai-2027/out/score.wav --out films/ai-2027/out/ai-2027-film.mp4   # ~2 h on 4 CPU cores
+node films/ai-2027/tools/render-video.mjs --fps 24 --query grain=0.4 --segments-only   # ~2 h on 4 CPU cores
+node films/ai-2027/tools/encode-share.mjs               # → dist/ai-2027-film.mp4 (2-pass x264, ~95 MB)
 ```
 
+For a high-bitrate master instead, drop `--segments-only` and add
+`--audio films/ai-2027/out/score.wav --out films/ai-2027/out/ai-2027-master.mp4 --crf 18 --tune film`.
+
 `render-video.mjs` drives headless Chromium (SwiftShader WebGL2) frame by frame, streams raw frames to
-ffmpeg, and writes resumable 10 s segments. `--stills` and `--contact` render single frames and contact
+ffmpeg, and writes resumable 10 s segments (`--redo a:b` re-renders a time range after a fix).
+`encode-share.mjs` checks that the segments cover the whole film, then encodes them with the score in two
+passes to a target size. `--stills` and `--contact` render single frames and contact
 sheets for review. `node films/ai-2027/audio/dsp.test.mjs` runs the DSP tests.
 
 ## Sources and credits
