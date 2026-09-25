@@ -32,7 +32,8 @@ float building(float x, float layer, out float id){
 void main(){
   vec2 uv = vUv;
   float ph = fract(uDay);
-  float blur = smoothstep(1.2, 4.0, uSpeed);
+  // days blur into a steady twilight well before they could strobe (> 2 days/s would flash > 2x a second)
+  float blur = smoothstep(0.7, 2.2, uSpeed);
   vec3 avg = vec3(0.12, 0.16, 0.26) + vec3(0.25, 0.1, 0.05) * 0.2;
   vec3 sky = mix(skyCol(ph, uv.y), mix(avg * 0.9, avg * 0.5, uv.y), blur);
   // sun & moon arcs (become light trails when fast)
