@@ -752,6 +752,8 @@ async function renderVideo(opt, ctx) {
     } finally {
       await Promise.all(ctx.shards.map(s => s.stop()));
     }
+    // on SIGINT/SIGTERM the workers return quietly: stop here instead of reporting success and encoding
+    if (ctx.aborting) throw new FatalError('interrupted');
   } else await first.stop();
   const renderSec = (nowMs() - tRender) / 1000;
   const rendered = total - already;
@@ -765,6 +767,8 @@ async function renderVideo(opt, ctx) {
   if (opt.segmentsOnly) return summary;
 
   // ---- final encode
+  const missing = segs.filter(s => !fs.existsSync(s.file));
+  if (missing.length) throw new FatalError(`${missing.length} segment(s) missing (first: ${path.basename(missing[0].file)}); rerun to render them`);
   const out = path.resolve(opt.out);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const list = path.join(ctx.segDir, `concat_${process.pid}.txt`);
@@ -906,6 +910,7 @@ async function main() {
     summary.wallSeconds = +((nowMs() - t0) / 1000).toFixed(1);
     if (errorCounts.size) summary.pageErrors = Object.fromEntries([...errorCounts].slice(0, 50));
   } catch (e) {
+    if (interrupted) return;            // the signal handler cleans up and exits with 130
     code = e instanceof UsageError ? 2 : 1;
     warn(`\nERROR: ${e instanceof FatalError || e instanceof UsageError ? e.message : e.stack || e.message}`);
     summary = { error: e.message, wallSeconds: +((nowMs() - t0) / 1000).toFixed(1) };
