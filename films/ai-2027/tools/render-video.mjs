@@ -64,7 +64,7 @@ const OPTIONS = {
   audioOffset: ['num', 'film time (s) at which the audio file starts (like ffmpeg -itsoffset); default 0'],
   crf: ['num', 'final x264 CRF'], preset: ['str', 'final x264 preset'], tune: ['str', 'final x264 tune (film, animation, grain, ...)'],
   x264Params: ['str', 'extra -x264-params for the final encode'],
-  shards: ['str', 'parallel browsers: auto or N'], segmentSeconds: ['num', 'segment length (s)'],
+  shards: ['str', 'parallel browsers: N, or auto = cores/2 capped by free RAM (2 on 4 cores; best in benchmarks)'], segmentSeconds: ['num', 'segment length (s)'],
   fresh: ['bool', 'delete this configuration\'s segments first'], redo: ['str', 'a:b — delete & re-render segments overlapping [a,b) s'],
   segmentsOnly: ['bool', 'render segments but skip the final encode'], segmentsDir: ['path', 'intermediate segment dir'],
   capture: ['str', 'raw (default) | jpeg | png | screenshot'], jpegQuality: ['num', 'quality for --capture jpeg (0..1)'],
@@ -80,7 +80,9 @@ const OPTIONS = {
 };
 
 function usage() {
-  const lines = Object.entries(OPTIONS).map(([k, [type, help]]) => `  --${kebab(k)}${type === 'bool' ? '' : ' <' + type + '>'}`.padEnd(30) + help);
+  const rel = (v) => typeof v === 'string' && v.startsWith(ROOT) ? path.relative(ROOT, v) : v;
+  const lines = Object.entries(OPTIONS).map(([k, [type, help]]) => `  --${kebab(k)}${type === 'bool' ? '' : ' <' + type + '>'}`.padEnd(30) + help +
+    (DEFAULTS[k] !== undefined && DEFAULTS[k] !== '' && !/default/.test(help) ? ` (default ${rel(DEFAULTS[k])})` : ''));
   return fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 13).map(l => l.replace(/^\/\/ ?/, '')).join('\n') + '\nOptions:\n' + lines.join('\n');
 }
 function kebab(s) { return s.replace(/[A-Z]/g, c => '-' + c.toLowerCase()); }
