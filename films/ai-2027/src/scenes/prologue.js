@@ -8,7 +8,7 @@ const LINE_Y = 590;
 
 function camYear(lt) {
   // keyframes: [time, year]
-  const K = [[0, 2021.25], [9.4, 2021.75], [11.2, 2024.2], [15.0, 2024.45], [16.4, 2025.2], [19.2, 2025.4], [25, 2025.9]];
+  const K = [[0, 2021.25], [8.6, 2021.75], [10.2, 2024.2], [13.4, 2024.45], [14.6, 2025.2], [17.6, 2025.4], [25, 2025.9]];
   for (let i = 0; i < K.length - 1; i++) {
     const [t0, y0] = K[i], [t1, y1] = K[i + 1];
     if (lt <= t1) return lerp(y0, y1, ease.inOutCubic((lt - t0) / (t1 - t0)));
@@ -33,7 +33,7 @@ export default {
   },
   render(R, t, lt) {
     // warp toward the end
-    const warp = ease.inCubic(clamp((lt - 19) / 6));
+    const warp = ease.inCubic(clamp((lt - 18) / 7));
     const cam = camera(R.g, { eye: [0, 0, 0], target: [0.05, 0.01, -1], fov: 55, far: 3000 });
     R.nebula.draw({ time: t, alpha: 0.55 + warp * 0.4, drift: [lt * 0.01, 0] });
     R.stars.draw(cam, { time: t, twinkle: 0.35, model: m4.translate(0, 0, warp * 260), size: 1 + warp * 1.5, alpha: 0.9 });
@@ -41,7 +41,7 @@ export default {
     const o = R.o;
     const cy = camYear(lt);
     const X = (year) => 960 + (year - cy) * YPX;
-    const la = win(lt, 0.2, 19.4, 1.0, 1.0);
+    const la = win(lt, 0.2, 17.8, 1.0, 1.0);
     if (la > 0) {
       o.save();
       // timeline line with glow
@@ -95,12 +95,12 @@ export default {
         o.restore();
       };
       marker(2021 + 7 / 12, 'AUG 2021 · “WHAT 2026 LOOKS LIKE”', win(lt, 0.9, 30, 0.8, 1));
-      marker(2024 + 3 / 12, 'APR 2024 · LEAVES OPENAI', win(lt, 10.2, 30, 0.8, 1));
-      marker(2025 + 3 / 12, 'APR 2025 · “AI 2027”', win(lt, 15.6, 30, 0.8, 1), COLORS.gold);
+      marker(2024 + 3 / 12, 'APR 2024 · LEAVES OPENAI', win(lt, 9.4, 30, 0.8, 1));
+      marker(2025 + 3 / 12, 'APR 2025 · “AI 2027”', win(lt, 14.0, 30, 0.8, 1), COLORS.gold);
 
       // 2021 essay card with predictions being checked off
       const x21 = X(2021 + 7 / 12);
-      const ca = win(lt, 1.4, 10.6, 0.9, 0.7);
+      const ca = win(lt, 1.4, 9.6, 0.9, 0.7);
       card(o, R, x21 + 150, 640, 380, 150, ca * la, (o) => {
         setFont(o, { weight: 600, size: 15, family: FONT.sans });
         o.fillStyle = COLORS.text; o.textBaseline = 'top';
@@ -112,7 +112,7 @@ export default {
           const yy = 712 + i * 18;
           o.fillStyle = 'rgba(200,210,225,0.28)';
           o.fillRect(x21 + 200, yy + 3, 240 - (i * 37) % 90, 5);
-          const ck = clamp((lt - 6.9 - i * 0.35) / 0.25);
+          const ck = clamp((lt - 6.8 - i * 0.3) / 0.25);
           if (ck > 0) {
             o.save();
             o.globalAlpha *= ck;
@@ -124,7 +124,7 @@ export default {
       });
       // 2025 report card
       const x25 = X(2025 + 3 / 12);
-      const ra = win(lt, 16.2, 19.5, 0.8, 0.6);
+      const ra = win(lt, 14.6, 17.8, 0.8, 0.6);
       card(o, R, x25 + 150, 630, 320, 160, ra * la, (o) => {
         setFont(o, { weight: 200, size: 44, family: FONT.wide, stretch: 'expanded' });
         o.fillStyle = COLORS.text; o.textBaseline = 'top';

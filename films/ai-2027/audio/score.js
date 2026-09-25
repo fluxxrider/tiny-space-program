@@ -129,12 +129,12 @@ export function build(B) {
   ticks('prologue', 8, 1, 2, 0.4);
   ticks('prologue', 9, 0.75, 4, 0.45);
   I.drone(L, T('prologue', 0), 25, 'D1', 0.55, { a: 1, r: 1 });
-  pianoArp('prologue', 0, ['Dm', 'Bb', 'F', 'C', 'Dm', 'Bb', 'Gm', null], { vel: 0.32, rate: 2 });
+  pianoArp('prologue', 0, ['Dm', 'Bb', 'F', 'C', 'Dm', 'Bb', 'Gm'], { vel: 0.32, rate: 2 });
   chords('prologue', 2, ['Bb', 'F', 'C', 'Dm', 'Bb', 'Gm'], { inst: 'strings', vel: 0.2, o: { a: 1.2, r: 1.5 } });
   // the quote: strings swell to the title
-  chords('prologue', 7.75, ['Bb'], { inst: 'strings', vel: 0.35, o: { a: 2.5, r: 0.3 }, each: 1.25 });
+  chords('prologue', 7.1, ['Bb'], { inst: 'strings', vel: 0.35, o: { a: 2.5, r: 0.3 }, each: 1.9 });
   chords('prologue', 9, ['Asus'], { inst: 'strings', vel: 0.45, o: { a: 1.5, r: 0.2 }, each: 0.75 });
-  melody('prologue', 7.75, [['F5', 3], ['E5', 2], ['D5', 2], ['C#5', 2]], { inst: 'piano', vel: 0.45 });
+  melody('prologue', 7.1, [['F5', 4], ['E5', 2], ['D5', 3], ['C#5', 3]], { inst: 'piano', vel: 0.45 });
   I.riser(X, T('prologue', 8.5), T('prologue', 9, 3), 0.7);
   I.reverseCymbal(X, T('title', 0), 2.4, 0.8);
   I.shepard(X, T('prologue', 8), T('prologue', 9.75), 0.5, { rate: 0.35, fadeIn: 2.5, fadeOut: 0.1 });

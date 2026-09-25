@@ -3,7 +3,7 @@
 // Set DSP_SKIP_PERF=1 to skip the whole-film (22M-sample) timing tests.
 
 import * as dsp from './dsp.js';
-import { performance, PerformanceObserver } from 'node:perf_hooks';
+import { performance, PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -178,11 +178,12 @@ function schroederRt60(x) {
   return -60 / slope;
 }
 
-/** Number of V8 garbage collections while running fn (allocation detector). */
+/** Number of V8 minor GCs (scavenges) while running fn — per-sample heap allocations
+ *  (e.g. boxed doubles) show up as scavenges; big typed-array backing stores do not. */
 async function countGCs(fn) {
   let count = 0;
   const obs = new PerformanceObserver((list) => {
-    count += list.getEntries().length;
+    for (const e of list.getEntries()) if (e.detail?.kind === perfConstants.NODE_PERFORMANCE_GC_MINOR) count++;
   });
   obs.observe({ entryTypes: ['gc'] });
   fn();
@@ -860,8 +861,8 @@ test('limiter: +12 dB transients never exceed the ceiling; gain curve is smooth'
     const s = Math.round(t * SR);
     const k = dsp.pluck(4800, 60 + 400 * r(), { decay: 0.1, brightness: 1, rand: r });
     for (let i = 0; i < k.length && s + i < n; i++) {
-      L[s + i] += basePk * 3 * k[i];
-      R[s + i] -= basePk * 3 * k[i] * 0.8;
+      L[s + i] += basePk * 4.5 * k[i];
+      R[s + i] -= basePk * 4.5 * k[i] * 0.8;
     }
   }
   const inPk = Math.max(peakAbs(L), peakAbs(R));
@@ -873,7 +874,7 @@ test('limiter: +12 dB transients never exceed the ceiling; gain curve is smooth'
   for (let i = 1; i < n; i++) maxStep = Math.max(maxStep, Math.abs(res.gain[i] - res.gain[i - 1]));
   const tp = dsp.gainToDb(dsp.truePeak(L, R));
   info(`in peak ${f2(db(inPk))} dBFS (${f2(db(inPk / basePk))} dB transients) → out ${f2(db(outPk), 4)} dBFS, true peak ${f2(tp, 3)} dBTP, min gain ${f2(res.minGainDb)} dB, max |Δgain|/sample ${maxStep.toExponential(2)}, safety clamps ${res.clamped} [${fmtMs(ms)}]`);
-  assert(db(inPk / basePk) > 11, 'test signal has ~+12 dB transients');
+  assert(db(inPk / basePk) >= 12, 'test signal has ≥ +12 dB transients');
   assert(outPk <= ceil, `sample peak ${outPk} > ceiling ${ceil}`);
   assert(res.clamped === 0, 'gain curve alone must satisfy the ceiling');
   assert(maxStep < 0.01, 'no gain discontinuities');
@@ -1065,35 +1066,52 @@ test('WAV: encode/decode round-trip (16-bit dithered, 24-bit, 32-bit float, mono
 // Engineering properties
 // ════════════════════════════════════════════════════════════════════════════════════════
 
-test('no allocations inside per-sample loops (zero GCs while processing 48M samples)', async () => {
-  const n = 1 << 20;
-  const buf = dsp.noise(n, 1);
+test('no allocations inside per-sample loops (no scavenges while processing ~2M samples per function)', async () => {
+  const n = 1 << 21;
+  const x = dsp.noise(n, 1);
+  const y = dsp.noise(n, 2);
   const cut = dsp.envSegments(n, [[0, 100], [n / SR, 8000]], 'exp');
-  const bq = new dsp.Biquad('peaking', 1000, 1, 6);
-  const sv = new dsp.SVF('lp');
-  const ld = new dsp.Ladder();
-  const op = new dsp.OnePole('hp', 100);
-  const dc = new dsp.DCBlocker();
-  const run = () => {
-    for (let k = 0; k < 8; k++) {
-      bq.process(buf);
-      sv.process(buf, cut, 4);
-      ld.process(buf, cut, 0.8);
-      op.process(buf);
-      dc.process(buf);
-      for (let i = 0; i < n; i++) buf[i] *= 0.5; // keep bounded
-    }
+  const pw = dsp.envSegments(n, [[0, 0.1], [n / SR, 0.9]], 'lin');
+  const ir = dsp.makeReverbIR({ seconds: 0.5 });
+  const sb = new dsp.StereoBuffer(n);
+  const bound = (b) => {
+    for (let i = 0; i < b.length; i++) b[i] = Math.min(1, Math.max(-1, b[i]));
   };
-  run(); // warm up (JIT)
-  const gcs = await countGCs(run);
-  const big = new dsp.StereoBuffer(n);
-  const b2 = dsp.noise(n, 2);
-  const gcs2 = await countGCs(() => {
-    for (let k = 0; k < 8; k++) big.addMono(k, b2, 0.1, 0.2);
-    dsp.compressor(big.L, big.R, { threshold: -30, ratio: 4 });
-  });
-  info(`GCs during 5 filters × 8 × 1M samples: ${gcs}; during mixing + compressor: ${gcs2}`);
-  assert(gcs <= 1 && gcs2 <= 2, 'inner loops must not allocate');
+  const cases = {
+    'osc saw (glide)': () => dsp.osc('saw', n, cut),
+    'osc pulse (PWM)': () => dsp.osc('pulse', n, 220, { pw }),
+    'osc tri / sine': () => (dsp.osc('tri', n, cut), dsp.osc('sine', n, 440)),
+    'noise pink/brown': () => (dsp.noise(n, 4, 'pink'), dsp.noise(n, 4, 'brown')),
+    'adsr / envSegments': () => (dsp.adsr(n, { curve: 'exp' }), dsp.envSegments(n, [[0, 1], [40, 0.01]], 'exp')),
+    Biquad: () => new dsp.Biquad('peaking', 1000, 1, 6).process(x),
+    'SVF const + modulated': () => (new dsp.SVF('bp').process(x, 900, 3), new dsp.SVF('lp').process(x, cut, 4)),
+    'Ladder const + modulated': () => (new dsp.Ladder().process(x, 900, 0.7), new dsp.Ladder().process(x, cut, 0.9)),
+    'OnePole + DCBlocker': () => (new dsp.OnePole('hp', 100).process(x), new dsp.DCBlocker().process(x)),
+    pluck: () => dsp.pluck(n, 110, { decay: 20 }),
+    'StereoBuffer.addMono': () => (sb.addMono(3, x, 0.3, 0.2), sb.addMono(5, x, pw, 0.1)),
+    'convolve (FFT)': () => dsp.convolve(x, ir.L),
+    pingPongDelay: () => dsp.pingPongDelay(x, y, { time: 0.3 }),
+    chorus: () => dsp.chorus(x, y),
+    compressor: () => dsp.compressor(x, y, { threshold: -30, ratio: 4 }),
+    limiter: () => dsp.limiter(x, y, { ceilingDb: -6 }),
+    'loudness + curve': () => (dsp.loudness(x, y), dsp.loudnessCurve(x, y)),
+    'encodeWav 16/24': () => (dsp.encodeWav(x, y), dsp.encodeWav(x, y, { bitDepth: 24 })),
+  };
+  const rows = [];
+  let worst = 0;
+  for (const [name, fn] of Object.entries(cases)) {
+    fn(); // warm-up: let V8 tier the kernels up before measuring
+    fn();
+    bound(x);
+    bound(y);
+    const g = await countGCs(fn);
+    bound(x);
+    bound(y);
+    worst = Math.max(worst, g);
+    rows.push(`${name} ${g}`);
+    assert(g <= 1, `${name}: ${g} scavenges — something allocates per sample`);
+  }
+  info(`scavenges per function (2M samples each): ${rows.join(', ')}`);
 });
 
 test('determinism: same seed → identical output; different seed → different', () => {
@@ -1140,19 +1158,29 @@ test('denormals: silent tails after an impulse process as fast as noise (no subn
     }
   };
   const rows = [];
-  for (const [name, fn] of Object.entries(cases)) {
+  const best = (src) => {
+    let t = Infinity;
+    for (let r = 0; r < 3; r++) {
+      const b = src.slice();
+      t = Math.min(t, timeIt(() => fn(b))[1]);
+      assert(allFinite(b), 'finite');
+    }
+    return t;
+  };
+  let fn;
+  for (const [name, f] of Object.entries(cases)) {
+    fn = f;
     fn(noiseBuf.slice(0, 1 << 16));
     fn(imp.slice(0, 1 << 16));
-    const [, tN] = timeIt(() => fn(noiseBuf.slice()));
-    const ib = imp.slice();
-    const [, tI] = timeIt(() => fn(ib));
-    assert(allFinite(ib), `${name} finite`);
+    const tN = best(noiseBuf);
+    const tI = best(imp);
     rows.push(`${name} ${f2(tI / tN)}×`);
-    assert(tI < 2.5 * tN + 5, `${name}: silent tail ${fmtMs(tI)} vs noise ${fmtMs(tN)}`);
+    assert(tI < 2 * tN + 5, `${name}: silent tail ${fmtMs(tI)} vs noise ${fmtMs(tN)}`);
   }
   naive(noiseBuf.slice(0, 1 << 16));
-  const [, cN] = timeIt(() => naive(noiseBuf.slice()));
-  const [, cI] = timeIt(() => naive(imp.slice()));
+  fn = naive;
+  const cN = best(noiseBuf);
+  const cI = best(imp);
   info(`tail/noise time ratios: ${rows.join(', ')} | unprotected control: ${f2(cI / cN)}×`);
 });
 

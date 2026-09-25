@@ -10,10 +10,14 @@
  *  - Audio buffers are Float32Array. Recursive filter state is kept in doubles.
  *  - Times are seconds, frequencies Hz, levels dB unless stated otherwise.
  *  - "In place" functions mutate their Float32Array arguments (and return them for chaining).
- *  - Recursive filters add a 1e-20 DC offset to their input so their state can never decay
- *    into subnormal floats (V8 does not flush denormals and they are ~100x slower on x86).
- *    The resulting DC is ~ -400 dBFS.
- *  - Nothing allocates inside per-sample loops; lookup tables (BLEP, FFT twiddles) are cached.
+ *  - Recursive filters add a 1e-20 DC offset to their input (or flush tiny states) so their
+ *    state can never decay into subnormal floats (V8 does not flush denormals; they are
+ *    10-100x slower on x86). The resulting DC is ~ -400 dBFS.
+ *  - Per-sample loops live in small kernel functions called once per 2048-sample block with
+ *    state in Float64Arrays, so V8 optimises them normally and they never allocate (see the
+ *    note at the top of the Filters section). Lookup tables (BLEP, FFT twiddles, resampling
+ *    and true-peak filters) are built once and cached.
+ *  - All randomness comes from seeded PRNGs: same seed → bit-identical output.
  *
  * @module dsp
  */
@@ -2080,8 +2084,6 @@ export function pingPongDelay(L, R, o = {}) {
   const dR = Math.max(1, Math.round((o.timeR ?? time) * sr));
   const lineL = new Float32Array(dL);
   const lineR = new Float32Array(dR);
-  let iL = 0;
-  let iR = 0;
   const tg = (f) => {
     const g = Math.tan((Math.PI * clamp(f, 1, 0.49 * sr)) / sr);
     return g / (1 + g);
@@ -2305,6 +2307,36 @@ function reqGainKernel(g, i0, i1, target) {
   for (let i = i0; i < i1; i++) g[i] = Math.min(1, target / Math.max(g[i], 1e-30));
 }
 
+/** Forward sliding minimum g[i] = min(g[i .. i+W-1]) (in place; values beyond n count as 1). */
+function slidingMinKernel(g, n, j0, j1, W, dqI, dqV, cap, ds) {
+  let hd = ds[0];
+  let cnt = ds[1];
+  for (let j = j0; j < j1; j++) {
+    const v = j < n ? g[j] : 1;
+    while (cnt > 0) {
+      let b = hd + cnt - 1;
+      if (b >= cap) b -= cap;
+      if (dqV[b] >= v) cnt--;
+      else break;
+    }
+    let t = hd + cnt;
+    if (t >= cap) t -= cap;
+    dqI[t] = j;
+    dqV[t] = v;
+    cnt++;
+    const i = j - W + 1;
+    if (i >= 0) {
+      while (dqI[hd] < i) {
+        if (++hd === cap) hd = 0;
+        cnt--;
+      }
+      g[i] = dqV[hd];
+    }
+  }
+  ds[0] = hd;
+  ds[1] = cnt;
+}
+
 function releaseKernel(g, i0, i1, st, aR) {
   let r = st[0];
   for (let i = i0; i < i1; i++) {
@@ -2397,30 +2429,9 @@ export function limiter(L, R, { ceilingDb = -1, lookahead = 0.005, release = 0.1
   const cap = W + 2;
   const dqI = new Int32Array(cap);
   const dqV = new Float64Array(cap);
-  let hd = 0;
-  let cnt = 0;
-  for (let j = 0; j < n + W - 1; j++) {
-    const v = j < n ? g[j] : 1;
-    while (cnt > 0) {
-      let b = hd + cnt - 1;
-      if (b >= cap) b -= cap;
-      if (dqV[b] >= v) cnt--;
-      else break;
-    }
-    let t = hd + cnt;
-    if (t >= cap) t -= cap;
-    dqI[t] = j;
-    dqV[t] = v;
-    cnt++;
-    const i = j - W + 1;
-    if (i >= 0) {
-      while (dqI[hd] < i) {
-        if (++hd === cap) hd = 0;
-        cnt--;
-      }
-      g[i] = dqV[hd];
-    }
-  }
+  const ds = new Int32Array(2); // deque head, count
+  const total = n + W - 1;
+  for (let p = 0; p < total; p += BLOCK) slidingMinKernel(g, n, p, Math.min(total, p + BLOCK), W, dqI, dqV, cap, ds);
   // release (attack is instantaneous here; the box filters turn it into a ramp)
   const aR = Math.exp(-1 / (Math.max(1e-4, release) * sr));
   const rs = new Float64Array([n ? g[0] : 1]);
